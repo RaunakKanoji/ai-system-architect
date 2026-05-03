@@ -1,12 +1,7 @@
-import { Button } from "@/components/ui/button";
-
 export default function Home() {
   return (
-    <div className="flex min-h-screen items-center justify-center">
+    <main className="flex min-h-screen items-center justify-center bg-base text-copy-primary">
       AI System Architect
-      <div>
-        <Button>Click Me</Button>
-      </div>
-    </div>
+    </main>
   );
 }
