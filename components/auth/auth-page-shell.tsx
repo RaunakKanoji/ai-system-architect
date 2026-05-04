@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { BrainCircuit, Network, ScrollText } from "lucide-react";
 
-interface AuthFeature {
+export interface AuthFeature {
   title: string;
   description: string;
 }
@@ -9,7 +9,7 @@ interface AuthFeature {
 interface AuthPageShellProps {
   title: string;
   description: string;
-  features: AuthFeature[];
+  features: readonly AuthFeature[];
   children: ReactNode;
 }
 
