@@ -1,7 +1,10 @@
-export default function Home() {
-  return (
-    <main className="flex min-h-screen items-center justify-center bg-base text-copy-primary">
-      AI System Architect
-    </main>
-  );
+import { auth } from "@clerk/nextjs/server";
+import { redirect } from "next/navigation";
+
+import { getSignInPath } from "@/lib/auth-paths";
+
+export default async function Home() {
+  const { userId } = await auth();
+
+  redirect(userId ? "/editor" : getSignInPath());
 }
