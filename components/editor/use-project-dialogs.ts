@@ -26,6 +26,10 @@ function createSlug(value: string) {
   );
 }
 
+async function submitProjectAction() {
+  await Promise.resolve();
+}
+
 export function useProjectDialogs() {
   const [dialogState, setDialogState] = useState<ProjectDialogState>({
     type: null,
@@ -57,7 +61,7 @@ export function useProjectDialogs() {
     setProjectName(project.name);
   }
 
-  function submitDialog(event?: FormEvent<HTMLFormElement>) {
+  async function submitDialog(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
 
     if (
@@ -72,7 +76,13 @@ export function useProjectDialogs() {
     }
 
     setIsLoading(true);
-    closeDialog();
+
+    try {
+      await submitProjectAction();
+      closeDialog();
+    } catch {
+      setIsLoading(false);
+    }
   }
 
   return {
