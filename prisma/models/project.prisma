@@ -1,3 +1,5 @@
+/// Current phase only distinguishes editable drafts from archived projects.
+/// Shared access is represented by ProjectCollaborator rows.
 enum ProjectStatus {
   DRAFT
   ARCHIVED
