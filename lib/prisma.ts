@@ -14,7 +14,7 @@ function createPrismaClient() {
   }
 
   return new PrismaClient({
-    adapter: new PrismaPg(databaseUrl),
+    adapter: new PrismaPg({ connectionString: databaseUrl }),
   });
 }
 

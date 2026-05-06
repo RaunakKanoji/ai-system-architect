@@ -24,7 +24,7 @@ model ProjectCollaborator {
   createdAt DateTime @default(now()) @map("created_at")
   project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
-  @@unique([projectId, email])
+  @@id([projectId, email])
   @@index([email])
   @@index([projectId, createdAt])
 }
