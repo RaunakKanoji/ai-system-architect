@@ -22,7 +22,7 @@ model Project {
 
 model ProjectCollaborator {
   projectId String   @map("project_id")
-  email     String
+  email     String   /// Stored in lowercase; normalize before insert/query
   createdAt DateTime @default(now()) @map("created_at")
   project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
