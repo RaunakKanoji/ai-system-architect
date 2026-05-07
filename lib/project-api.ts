@@ -109,12 +109,15 @@ async function readJsonBody(
   request: Request,
   options: { defaultMissing: boolean },
 ): Promise<unknown | Response> {
+  const requestClone = request.clone();
   let body: unknown;
 
   try {
     body = await request.json();
   } catch {
-    if (options.defaultMissing) {
+    const rawBody = await requestClone.text().catch(() => "");
+
+    if (options.defaultMissing && rawBody.trim() === "") {
       return DEFAULT_PROJECT_NAME;
     }
 

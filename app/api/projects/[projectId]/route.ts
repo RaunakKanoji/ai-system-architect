@@ -52,6 +52,10 @@ export async function PATCH(request: Request, context: ProjectRouteContext) {
 export async function DELETE(_request: Request, context: ProjectRouteContext) {
   const userId = await requireUserId();
 
+  if (userId instanceof Response) {
+    return userId;
+  }
+
   const { projectId } = await context.params;
   const project = await prisma.project.findUnique({
     where: { id: projectId },
@@ -62,10 +66,6 @@ export async function DELETE(_request: Request, context: ProjectRouteContext) {
   }
 
   if (project.ownerId !== userId) {
-    return apiError(403, "forbidden", "Only the project owner can delete.");
-  }
-
-  if (!project || project.ownerId !== userId) {
     return apiError(403, "forbidden", "Only the project owner can delete.");
   }
 

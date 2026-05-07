@@ -110,6 +110,12 @@ export function ProjectSidebar({
     return null;
   }
 
+  const defaultTab = sharedProjects.some(
+    (project) => project.id === activeProjectId,
+  )
+    ? "shared"
+    : "my-projects";
+
   return (
     <>
       <button
@@ -139,7 +145,7 @@ export function ProjectSidebar({
         </header>
 
         <Tabs
-          defaultValue="my-projects"
+          defaultValue={defaultTab}
           className="mt-4 flex min-h-0 flex-1 flex-col"
         >
           <TabsList className="grid w-full grid-cols-2">

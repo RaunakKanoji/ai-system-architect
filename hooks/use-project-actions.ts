@@ -52,11 +52,18 @@ async function readProjectResponse(response: Response): Promise<ProjectResponse>
 }
 
 export function createProjectRoomId(name: string) {
-  return `${slugify(name)}-${createShortSuffix()}`;
+  return createRoomId(name, `-${createShortSuffix()}`);
 }
 
 export function previewProjectRoomId(name: string) {
-  return `${slugify(name)}-xxxx`;
+  return createRoomId(name, "-xxxx");
+}
+
+function createRoomId(name: string, suffix: string) {
+  const maxSlugLength = 80 - suffix.length;
+  const slug = slugify(name).slice(0, maxSlugLength);
+
+  return `${slug}${suffix}`;
 }
 
 export function useProjectActions() {
@@ -175,7 +182,8 @@ export function useProjectActions() {
       }
     } catch (err: unknown) {
       setIsLoading(false);
-      const message = err instanceof Error ? err.message : String(err ?? "Unknown error");
+      const message =
+        err instanceof Error ? err.message : String(err ?? "Unknown error");
       setError(`Project action failed: ${message}`);
     }
   }
