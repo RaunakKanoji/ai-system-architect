@@ -1,19 +1,22 @@
 "use client";
 
 import { Pencil, Plus, Trash2, X } from "lucide-react";
+import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import type { MockProject } from "@/components/editor/use-project-dialogs";
+import type { EditorProject } from "@/lib/project-data";
 import { cn } from "@/lib/utils";
 
 interface ProjectSidebarProps {
+  activeProjectId?: string;
   isOpen: boolean;
   onClose: () => void;
   onCreateProject: () => void;
-  onDeleteProject: (project: MockProject) => void;
-  onRenameProject: (project: MockProject) => void;
-  projects: readonly MockProject[];
+  onDeleteProject: (project: EditorProject) => void;
+  onRenameProject: (project: EditorProject) => void;
+  ownedProjects: readonly EditorProject[];
+  sharedProjects: readonly EditorProject[];
 }
 
 function ProjectEmptyState() {
@@ -25,12 +28,14 @@ function ProjectEmptyState() {
 }
 
 interface ProjectListProps {
-  projects: readonly MockProject[];
-  onDeleteProject: (project: MockProject) => void;
-  onRenameProject: (project: MockProject) => void;
+  activeProjectId?: string;
+  projects: readonly EditorProject[];
+  onDeleteProject: (project: EditorProject) => void;
+  onRenameProject: (project: EditorProject) => void;
 }
 
 function ProjectList({
+  activeProjectId,
   projects,
   onDeleteProject,
   onRenameProject,
@@ -44,15 +49,21 @@ function ProjectList({
       {projects.map((project) => (
         <li
           key={project.id}
-          className="rounded-xl border border-surface-border bg-surface/60 p-3"
+          className={cn(
+            "rounded-xl border border-surface-border bg-surface/60 p-3",
+            project.id === activeProjectId && "border-brand bg-accent-dim",
+          )}
         >
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <p className="truncate text-sm font-medium text-copy-primary">
+              <Link
+                className="block truncate text-sm font-medium text-copy-primary hover:text-brand"
+                href={`/editor/${project.id}`}
+              >
                 {project.name}
-              </p>
+              </Link>
               <p className="truncate font-mono text-xs text-copy-muted">
-                {project.slug}
+                {project.id}
               </p>
             </div>
 
@@ -86,23 +97,18 @@ function ProjectList({
 }
 
 export function ProjectSidebar({
+  activeProjectId,
   isOpen,
   onClose,
   onCreateProject,
   onDeleteProject,
   onRenameProject,
-  projects,
+  ownedProjects,
+  sharedProjects,
 }: ProjectSidebarProps) {
   if (!isOpen) {
     return null;
   }
-
-  const ownedProjects = projects.filter(
-    (project) => project.ownership === "owned"
-  );
-  const sharedProjects = projects.filter(
-    (project) => project.ownership === "shared"
-  );
 
   return (
     <>
@@ -143,6 +149,7 @@ export function ProjectSidebar({
 
           <TabsContent value="my-projects" className="mt-4 flex-1">
             <ProjectList
+              activeProjectId={activeProjectId}
               projects={ownedProjects}
               onDeleteProject={onDeleteProject}
               onRenameProject={onRenameProject}
@@ -150,6 +157,7 @@ export function ProjectSidebar({
           </TabsContent>
           <TabsContent value="shared" className="mt-4 flex-1">
             <ProjectList
+              activeProjectId={activeProjectId}
               projects={sharedProjects}
               onDeleteProject={onDeleteProject}
               onRenameProject={onRenameProject}
