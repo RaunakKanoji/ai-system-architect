@@ -9,10 +9,10 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import type { useProjectDialogs } from "@/components/editor/use-project-dialogs";
+import type { useProjectActions } from "@/hooks/use-project-actions";
 
 interface ProjectDialogsProps {
-  dialogs: ReturnType<typeof useProjectDialogs>;
+  dialogs: ReturnType<typeof useProjectActions>;
 }
 
 const dialogInputClassName =
@@ -36,8 +36,8 @@ export function ProjectDialogs({ dialogs }: ProjectDialogsProps) {
     closeDialog,
     isLoading,
     projectName,
+    roomIdPreview,
     setProjectName,
-    slugPreview,
     submitDialog,
   } = dialogs;
 
@@ -77,8 +77,8 @@ export function ProjectDialogs({ dialogs }: ProjectDialogsProps) {
                 placeholder="System design workspace"
               />
               <p className="pt-1 text-sm leading-6 text-copy-muted">
-                Slug preview:{" "}
-                <span className="font-mono text-brand">{slugPreview}</span>
+                Room ID preview:{" "}
+                <span className="font-mono text-brand">{roomIdPreview}</span>
               </p>
             </div>
 

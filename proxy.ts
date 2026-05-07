@@ -5,6 +5,7 @@ import { getSignInPath, getSignUpPath } from "@/lib/auth-paths";
 const isPublicRoute = createRouteMatcher([
   `${getSignInPath()}(.*)`,
   `${getSignUpPath()}(.*)`,
+  "/api/projects(.*)",
   "/__clerk/(.*)",
 ]);
 
