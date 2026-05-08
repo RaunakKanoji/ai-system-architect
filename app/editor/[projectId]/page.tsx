@@ -1,6 +1,13 @@
-import { EditorHomeClient } from "@/components/editor/editor-home-client";
+import { redirect } from "next/navigation";
+
+import { AccessDenied } from "@/components/editor/access-denied";
+import { EditorWorkspaceClient } from "@/components/editor/editor-workspace-client";
+import { getSignInPath } from "@/lib/auth-paths";
+import {
+  getAccessibleProject,
+  getCurrentProjectIdentity,
+} from "@/lib/project-access";
 import { getEditorProjects } from "@/lib/project-data";
-import { notFound } from "next/navigation";
 
 interface EditorWorkspacePageProps {
   params: Promise<{
@@ -11,22 +18,29 @@ interface EditorWorkspacePageProps {
 export default async function EditorWorkspacePage({
   params,
 }: EditorWorkspacePageProps) {
-  const [{ projectId }, { ownedProjects, sharedProjects }] = await Promise.all([
+  const [{ projectId }, identity] = await Promise.all([
     params,
+    getCurrentProjectIdentity(),
+  ]);
+
+  if (!identity) {
+    redirect(getSignInPath());
+  }
+
+  const [project, { ownedProjects, sharedProjects }] = await Promise.all([
+    getAccessibleProject(projectId, identity),
     getEditorProjects(),
   ]);
 
-  const hasAccess =
-    ownedProjects.some((p) => p.id === projectId) ||
-    sharedProjects.some((p) => p.id === projectId);
-
-  if (!hasAccess) {
-    notFound();
+  if (!project) {
+    return <AccessDenied />;
   }
 
   return (
-    <EditorHomeClient
-      activeProjectId={projectId}
+    <EditorWorkspaceClient
+      canManageAccess={project.ownerId === identity.userId}
+      projectName={project.name}
+      roomId={projectId}
       ownedProjects={ownedProjects}
       sharedProjects={sharedProjects}
     />
