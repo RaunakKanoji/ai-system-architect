@@ -6,12 +6,12 @@ import {
   Bot,
   PanelLeftClose,
   PanelLeftOpen,
-  PanelRightClose,
-  PanelRightOpen,
   Share2,
 } from "lucide-react";
 import Link from "next/link";
+import { UserButton } from "@clerk/nextjs";
 
+import { LiveblocksCanvas } from "@/components/editor/liveblocks-canvas";
 import { ProjectDialogs } from "@/components/editor/project-dialogs";
 import { ProjectSidebar } from "@/components/editor/project-sidebar";
 import { ShareDialog } from "@/components/editor/share-dialog";
@@ -40,11 +40,10 @@ export function EditorWorkspaceClient({
   const [isShareDialogOpen, setIsShareDialogOpen] = useState(false);
   const projectActions = useProjectActions();
   const SidebarIcon = isSidebarOpen ? PanelLeftClose : PanelLeftOpen;
-  const AiSidebarIcon = isAiSidebarOpen ? PanelRightClose : PanelRightOpen;
 
   return (
-    <main className="flex min-h-screen flex-col bg-base text-copy-primary">
-      <header className="grid h-14 shrink-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 border-b border-surface-border bg-surface px-4">
+    <main className="flex h-screen flex-col overflow-hidden bg-base text-copy-primary">
+      <header className="relative z-50 grid h-14 shrink-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 border-b border-surface-border bg-surface px-4">
         <div className="flex items-center gap-2">
           <Link
             aria-label="Back to editor"
@@ -82,13 +81,15 @@ export function EditorWorkspaceClient({
           </Button>
           <Button
             aria-label={isAiSidebarOpen ? "Close AI sidebar" : "Open AI sidebar"}
-            size="icon-sm"
+            className="hidden lg:flex"
             type="button"
             variant="ghost"
             onClick={() => setIsAiSidebarOpen((current) => !current)}
           >
-            <AiSidebarIcon className="h-4 w-4" />
+            <Bot className="h-4 w-4" />
+            AI
           </Button>
+          <UserButton />
         </div>
       </header>
 
@@ -103,28 +104,13 @@ export function EditorWorkspaceClient({
         sharedProjects={sharedProjects}
       />
 
-      <div
-        className={cn(
-          "grid min-h-0 flex-1 grid-cols-1",
-          isAiSidebarOpen && "lg:grid-cols-[minmax(0,1fr)_20rem]",
-        )}
-      >
-        <section className="grid min-h-[calc(100vh-3.5rem)] place-items-center bg-base px-6">
-          <div className="max-w-md text-center">
-            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl border border-surface-border bg-surface text-brand">
-              <PanelLeftOpen className="h-6 w-6" />
-            </div>
-            <h1 className="mt-5 text-xl font-semibold text-copy-primary">
-              Canvas workspace
-            </h1>
-            <p className="mt-2 text-sm leading-6 text-copy-muted">
-              Canvas rendering will appear here in a later feature.
-            </p>
-          </div>
+      <div className="relative min-h-0 flex-1 overflow-hidden bg-base">
+        <section className="absolute inset-0 bg-base">
+          <LiveblocksCanvas roomId={roomId} />
         </section>
 
         {isAiSidebarOpen ? (
-          <aside className="hidden min-h-0 border-l border-surface-border bg-surface/80 p-4 lg:flex lg:flex-col">
+          <aside className="absolute inset-y-0 right-0 z-30 hidden w-80 border-l border-surface-border bg-surface/95 p-4 shadow-2xl backdrop-blur lg:flex lg:flex-col">
             <div className="flex items-center gap-2 border-b border-surface-border pb-4">
               <Bot className="h-4 w-4 text-brand" />
               <h2 className="text-sm font-medium text-copy-primary">
