@@ -7,6 +7,8 @@ import {
   getAfterSignOutPath,
   getAfterSignUpPath,
 } from "@/lib/auth-paths";
+import "@xyflow/react/dist/style.css";
+import "@liveblocks/react-flow/styles.css";
 import "./globals.css";
 
 const geistSans = Geist({

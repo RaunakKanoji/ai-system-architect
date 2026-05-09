@@ -5,6 +5,8 @@ import { prisma } from "@/lib/prisma";
 export interface ProjectIdentity {
   userId: string;
   primaryEmail: string | null;
+  displayName: string;
+  avatarUrl: string | null;
 }
 
 export interface AccessibleProject {
@@ -25,6 +27,12 @@ export async function getCurrentProjectIdentity(): Promise<ProjectIdentity | nul
     // Normalize the primary email to a trimmed, lowercase form to match
     // collaborator email normalization used elsewhere.
     primaryEmail: user.primaryEmailAddress?.emailAddress.trim().toLowerCase() ?? null,
+    displayName:
+      user.fullName ??
+      user.username ??
+      user.primaryEmailAddress?.emailAddress ??
+      "Project collaborator",
+    avatarUrl: user.imageUrl || null,
   };
 }
 
