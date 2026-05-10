@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   ArrowLeft,
   Bot,
+  LayoutTemplate,
   PanelLeftClose,
   PanelLeftOpen,
   Share2,
@@ -11,10 +12,18 @@ import {
 import Link from "next/link";
 import { UserButton } from "@clerk/nextjs";
 
-import { LiveblocksCanvas } from "@/components/editor/liveblocks-canvas";
+import {
+  LiveblocksCanvas,
+  type LiveblocksCanvasHandle,
+} from "@/components/editor/liveblocks-canvas";
 import { ProjectDialogs } from "@/components/editor/project-dialogs";
 import { ProjectSidebar } from "@/components/editor/project-sidebar";
 import { ShareDialog } from "@/components/editor/share-dialog";
+import {
+  CANVAS_TEMPLATES,
+  type CanvasTemplate,
+} from "@/components/editor/starter-templates";
+import { StarterTemplatesModal } from "@/components/editor/starter-templates-modal";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { useProjectActions } from "@/hooks/use-project-actions";
 import type { EditorProject } from "@/lib/project-data";
@@ -38,8 +47,14 @@ export function EditorWorkspaceClient({
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isAiSidebarOpen, setIsAiSidebarOpen] = useState(true);
   const [isShareDialogOpen, setIsShareDialogOpen] = useState(false);
+  const [isTemplatesModalOpen, setIsTemplatesModalOpen] = useState(false);
+  const canvasRef = useRef<LiveblocksCanvasHandle>(null);
   const projectActions = useProjectActions();
   const SidebarIcon = isSidebarOpen ? PanelLeftClose : PanelLeftOpen;
+
+  function handleTemplateImport(template: CanvasTemplate) {
+    canvasRef.current?.importTemplate(template);
+  }
 
   return (
     <main className="flex h-screen flex-col overflow-hidden bg-base text-copy-primary">
@@ -74,6 +89,14 @@ export function EditorWorkspaceClient({
           <Button
             type="button"
             variant="outline"
+            onClick={() => setIsTemplatesModalOpen(true)}
+          >
+            <LayoutTemplate className="h-4 w-4" />
+            Templates
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
             onClick={() => setIsShareDialogOpen(true)}
           >
             <Share2 className="h-4 w-4" />
@@ -81,7 +104,10 @@ export function EditorWorkspaceClient({
           </Button>
           <Button
             aria-label={isAiSidebarOpen ? "Close AI sidebar" : "Open AI sidebar"}
-            className="hidden lg:flex"
+            className={cn(
+              "hidden border border-ai/40 bg-ai/15 text-ai-text shadow-2xl hover:bg-ai/25 hover:text-ai-text lg:flex",
+              isAiSidebarOpen && "bg-ai/25",
+            )}
             type="button"
             variant="ghost"
             onClick={() => setIsAiSidebarOpen((current) => !current)}
@@ -106,11 +132,11 @@ export function EditorWorkspaceClient({
 
       <div className="relative min-h-0 flex-1 overflow-hidden bg-base">
         <section className="absolute inset-0 bg-base">
-          <LiveblocksCanvas roomId={roomId} />
+          <LiveblocksCanvas ref={canvasRef} roomId={roomId} />
         </section>
 
         {isAiSidebarOpen ? (
-          <aside className="absolute inset-y-0 right-0 z-30 hidden w-80 border-l border-surface-border bg-surface/95 p-4 shadow-2xl backdrop-blur lg:flex lg:flex-col">
+          <aside className="absolute bottom-4 right-4 top-4 z-30 hidden w-[min(22rem,calc(100vw-2rem))] flex-col rounded-2xl border border-surface-border bg-surface/95 p-4 shadow-2xl backdrop-blur lg:flex">
             <div className="flex items-center gap-2 border-b border-surface-border pb-4">
               <Bot className="h-4 w-4 text-brand" />
               <h2 className="text-sm font-medium text-copy-primary">
@@ -127,6 +153,12 @@ export function EditorWorkspaceClient({
       </div>
 
       <ProjectDialogs dialogs={projectActions} />
+      <StarterTemplatesModal
+        isOpen={isTemplatesModalOpen}
+        templates={CANVAS_TEMPLATES}
+        onImport={handleTemplateImport}
+        onOpenChange={setIsTemplatesModalOpen}
+      />
       <ShareDialog
         canManageAccess={canManageAccess}
         isOpen={isShareDialogOpen}
