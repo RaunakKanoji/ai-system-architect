@@ -1,16 +1,51 @@
 "use client";
 
-import type { DragEvent, ErrorInfo, ReactNode } from "react";
-import { Component } from "react";
-import { ClientSideSuspense, LiveblocksProvider, RoomProvider } from "@liveblocks/react";
+import type {
+  ChangeEvent,
+  CSSProperties,
+  DragEvent,
+  ErrorInfo,
+  KeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
+  ReactNode,
+} from "react";
+import {
+  Component,
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
+import { useAuth } from "@clerk/nextjs";
+import {
+  ClientSideSuspense,
+  LiveblocksProvider,
+  RoomProvider,
+  useCanRedo,
+  useCanUndo,
+  useRedo,
+  useUndo,
+} from "@liveblocks/react";
 import { Cursors, useLiveblocksFlow } from "@liveblocks/react-flow";
 import {
   Background,
   BackgroundVariant,
+  BaseEdge,
+  type Connection,
+  ConnectionLineType,
+  EdgeLabelRenderer,
+  type EdgeProps,
+  getSmoothStepPath,
   type NodeProps,
   ConnectionMode,
   Handle,
+  MarkerType,
   MiniMap,
+  NodeResizer,
+  NodeToolbar,
   Position,
   ReactFlow,
   ReactFlowProvider,
@@ -21,26 +56,74 @@ import {
   Cylinder,
   Diamond,
   Hexagon,
+  Maximize2,
   Pill,
+  Redo2,
   Square,
+  Undo2,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 
+import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { cn } from "@/lib/utils";
+import type { CanvasTemplate } from "@/components/editor/starter-templates";
 import {
   DEFAULT_NODE_COLOR,
   DEFAULT_NODE_SIZES,
+  NODE_COLORS,
   NODE_SHAPES,
   type CanvasEdge,
   type CanvasNode,
+  type NodeColor,
   type NodeShape,
   type NodeSize,
 } from "@/types/canvas";
 
 const SHAPE_DRAG_MIME_TYPE = "application/x-ghost-ai-shape";
+const CANVAS_EDGE_STYLE = {
+  stroke: "var(--text-secondary)",
+  strokeWidth: 1.6,
+};
+const CANVAS_EDGE_MARKER = {
+  type: MarkerType.ArrowClosed,
+  color: "var(--text-secondary)",
+  width: 14,
+  height: 14,
+};
+const DEFAULT_EDGE_OPTIONS = {
+  markerEnd: CANVAS_EDGE_MARKER,
+  reconnectable: true,
+  style: CANVAS_EDGE_STYLE,
+  type: "canvasEdge",
+} satisfies Partial<CanvasEdge>;
+const HANDLE_SIDES = [
+  { id: "top", position: Position.Top },
+  { id: "right", position: Position.Right },
+  { id: "bottom", position: Position.Bottom },
+  { id: "left", position: Position.Left },
+] as const;
 
 interface ShapeDragPayload {
   shape: NodeShape;
   size: NodeSize;
+}
+
+interface ShapeDragPreviewState extends ShapeDragPayload {
+  cursor: {
+    x: number;
+    y: number;
+  };
+}
+
+interface ShapePanelProps {
+  onDragCancel: () => void;
+  onDragMove: (cursor: { x: number; y: number }) => void;
+  onDragStart: (payload: ShapeDragPreviewState) => void;
+  onPointerDrop: (
+    payload: ShapeDragPayload,
+    cursor: { x: number; y: number },
+  ) => void;
 }
 
 const shapeIcons = {
@@ -55,15 +138,67 @@ const shapeIcons = {
 const nodeTypes = {
   canvasNode: CanvasNodeRenderer,
 };
+const edgeTypes = {
+  canvasEdge: CanvasEdgeRenderer,
+  smoothstep: CanvasEdgeRenderer,
+};
 
 const handleStyle = {
   backgroundColor: "var(--text-primary)",
-  borderColor: "var(--bg-base)",
+  border: "1.5px solid var(--bg-base)",
+  height: 8,
+  width: 8,
 };
+const nodeResizerHandleStyle = {
+  backgroundColor: "var(--accent-primary)",
+  border: "1px solid var(--bg-base)",
+  height: 8,
+  width: 8,
+};
+const nodeResizerLineStyle = {
+  borderColor: "var(--accent-primary)",
+  opacity: 0.45,
+};
+const MIN_NODE_HEIGHT = 64;
+const MIN_NODE_WIDTH = 96;
+const NODE_SURFACE_STROKE_WIDTH = 1.5;
+const VIEWPORT_ANIMATION_DURATION = 160;
+
+interface MiniMapNodeShapeProps {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  className: string;
+  color?: string;
+  strokeColor?: string;
+  strokeWidth?: number;
+  selected: boolean;
+  onClick?: (event: ReactMouseEvent, id: string) => void;
+}
 
 interface LiveblocksCanvasProps {
   roomId: string;
 }
+
+export interface LiveblocksCanvasHandle {
+  importTemplate: (template: CanvasTemplate) => void;
+}
+
+interface TemplateImportRequest {
+  id: number;
+  template: CanvasTemplate;
+}
+
+type LiveblocksAuthResult =
+  | {
+      token: string;
+    }
+  | {
+      error: "forbidden";
+      reason: string;
+    };
 
 interface CanvasErrorBoundaryProps {
   children: ReactNode;
@@ -73,21 +208,129 @@ interface CanvasErrorBoundaryState {
   hasError: boolean;
 }
 
-export function LiveblocksCanvas({ roomId }: LiveblocksCanvasProps) {
+export const LiveblocksCanvas = forwardRef<
+  LiveblocksCanvasHandle,
+  LiveblocksCanvasProps
+>(function LiveblocksCanvas({ roomId }, ref) {
+  const { isLoaded, isSignedIn } = useAuth();
+  const [templateImportRequest, setTemplateImportRequest] =
+    useState<TemplateImportRequest | null>(null);
+  const authenticateLiveblocks = useCallback(
+    async (room?: string): Promise<LiveblocksAuthResult> => {
+      if (!room) {
+        return {
+          error: "forbidden",
+          reason: "A Liveblocks room ID is required.",
+        };
+      }
+
+      const response = await fetch("/api/liveblocks-auth", {
+        body: JSON.stringify({ room }),
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        const reason = await readLiveblocksAuthError(response);
+
+        if (response.status !== 401 && response.status !== 403) {
+          throw new Error(reason);
+        }
+
+        return {
+          error: "forbidden",
+          reason,
+        };
+      }
+
+      const data: unknown = await response.json();
+
+      if (!isLiveblocksTokenResponse(data)) {
+        return {
+          error: "forbidden",
+          reason: "Liveblocks auth returned an invalid token response.",
+        };
+      }
+
+      return data;
+    },
+    [],
+  );
+  useImperativeHandle(
+    ref,
+    () => ({
+      importTemplate(template) {
+        setTemplateImportRequest({
+          id: Date.now(),
+          template,
+        });
+      },
+    }),
+    [],
+  );
+
+  if (!isLoaded) {
+    return <CanvasLoadingState />;
+  }
+
+  if (!isSignedIn) {
+    return (
+      <CanvasStateFrame
+        title="Authentication required"
+        description="Sign in again to connect to the shared canvas."
+      />
+    );
+  }
+
   return (
     <CanvasErrorBoundary>
-      <LiveblocksProvider authEndpoint="/api/liveblocks-auth">
+      <LiveblocksProvider authEndpoint={authenticateLiveblocks}>
         <RoomProvider
           id={roomId}
           initialPresence={{ cursor: null, isThinking: false }}
         >
           <ClientSideSuspense fallback={<CanvasLoadingState />}>
-            {() => <CollaborativeFlow />}
+            {() => (
+              <CollaborativeFlow importRequest={templateImportRequest} />
+            )}
           </ClientSideSuspense>
         </RoomProvider>
       </LiveblocksProvider>
     </CanvasErrorBoundary>
   );
+});
+
+async function readLiveblocksAuthError(response: Response): Promise<string> {
+  const fallback = "Liveblocks authentication failed.";
+
+  try {
+    const data: unknown = await response.json();
+
+    if (
+      isRecord(data) &&
+      isRecord(data.error) &&
+      typeof data.error.message === "string"
+    ) {
+      return data.error.message;
+    }
+  } catch {
+    return fallback;
+  }
+
+  return fallback;
+}
+
+function isLiveblocksTokenResponse(
+  value: unknown,
+): value is { token: string } {
+  return isRecord(value) && typeof value.token === "string";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 class CanvasErrorBoundary extends Component<
@@ -120,47 +363,204 @@ class CanvasErrorBoundary extends Component<
   }
 }
 
-function CollaborativeFlow() {
+function CollaborativeFlow({
+  importRequest,
+}: {
+  importRequest: TemplateImportRequest | null;
+}) {
   return (
     <ReactFlowProvider>
-      <CollaborativeFlowContent />
+      <CollaborativeFlowContent importRequest={importRequest} />
     </ReactFlowProvider>
   );
 }
 
-function CollaborativeFlowContent() {
-  const { screenToFlowPosition } = useReactFlow<CanvasNode, CanvasEdge>();
-  const { nodes, edges, onNodesChange, onEdgesChange, onConnect, onDelete } =
+function CollaborativeFlowContent({
+  importRequest,
+}: {
+  importRequest: TemplateImportRequest | null;
+}) {
+  const [dragPreview, setDragPreview] =
+    useState<ShapeDragPreviewState | null>(null);
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const handledImportRequestIdRef = useRef<number | null>(null);
+  const reactFlow = useReactFlow<CanvasNode, CanvasEdge>();
+  const { screenToFlowPosition } = reactFlow;
+  const undo = useUndo();
+  const redo = useRedo();
+  const canUndo = useCanUndo();
+  const canRedo = useCanRedo();
+  const { nodes, edges, onNodesChange, onEdgesChange, onDelete } =
     useLiveblocksFlow<CanvasNode, CanvasEdge>({
       suspense: true,
       nodes: { initial: [] },
       edges: { initial: [] },
     });
+  const handleUndo = useCallback(() => {
+    if (canUndo) {
+      undo();
+    }
+  }, [canUndo, undo]);
+  const handleRedo = useCallback(() => {
+    if (canRedo) {
+      redo();
+    }
+  }, [canRedo, redo]);
+  const handleZoomIn = useCallback(() => {
+    void reactFlow.zoomIn({ duration: VIEWPORT_ANIMATION_DURATION });
+  }, [reactFlow]);
+  const handleZoomOut = useCallback(() => {
+    void reactFlow.zoomOut({ duration: VIEWPORT_ANIMATION_DURATION });
+  }, [reactFlow]);
+  const handleFitView = useCallback(() => {
+    void reactFlow.fitView({
+      duration: VIEWPORT_ANIMATION_DURATION,
+      padding: 0.18,
+    });
+  }, [reactFlow]);
+  const importTemplate = useCallback(
+    (template: CanvasTemplate) => {
+      const removedEdgeChanges = edges.map((edge) => ({
+        id: edge.id,
+        type: "remove" as const,
+      }));
+      const removedNodeChanges = nodes.map((node) => ({
+        id: node.id,
+        type: "remove" as const,
+      }));
+      const addedNodeChanges = template.nodes.map((node) => ({
+        item: cloneTemplateNode(node),
+        type: "add" as const,
+      }));
+      const addedEdgeChanges = template.edges.map((edge) => ({
+        item: cloneTemplateEdge(edge),
+        type: "add" as const,
+      }));
 
-  function handleDragOver(event: DragEvent<HTMLDivElement>) {
-    if (!event.dataTransfer.types.includes(SHAPE_DRAG_MIME_TYPE)) {
+      if (removedEdgeChanges.length) {
+        onEdgesChange(removedEdgeChanges);
+      }
+
+      if (removedNodeChanges.length) {
+        onNodesChange(removedNodeChanges);
+      }
+
+      if (addedNodeChanges.length) {
+        onNodesChange(addedNodeChanges);
+      }
+
+      if (addedEdgeChanges.length) {
+        onEdgesChange(addedEdgeChanges);
+      }
+
+      window.requestAnimationFrame(() => {
+        void reactFlow.fitView({
+          duration: VIEWPORT_ANIMATION_DURATION,
+          padding: 0.18,
+        });
+      });
+    },
+    [edges, nodes, onEdgesChange, onNodesChange, reactFlow],
+  );
+
+  useKeyboardShortcuts({
+    reactFlow,
+    redo: handleRedo,
+    undo: handleUndo,
+  });
+
+  useEffect(() => {
+    if (!importRequest) {
       return;
     }
 
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "copy";
+    if (handledImportRequestIdRef.current === importRequest.id) {
+      return;
+    }
+
+    handledImportRequestIdRef.current = importRequest.id;
+    importTemplate(importRequest.template);
+  }, [importRequest, importTemplate]);
+
+  useEffect(() => {
+    if (!dragPreview) {
+      return;
+    }
+
+    function cancelStaleDragPreview() {
+      setDragPreview(null);
+    }
+
+    function handleKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") {
+        cancelStaleDragPreview();
+      }
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === "hidden") {
+        cancelStaleDragPreview();
+      }
+    }
+
+    window.addEventListener("dragend", cancelStaleDragPreview);
+    window.addEventListener("drop", cancelStaleDragPreview);
+    window.addEventListener("blur", cancelStaleDragPreview);
+    window.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener("dragend", cancelStaleDragPreview);
+      window.removeEventListener("drop", cancelStaleDragPreview);
+      window.removeEventListener("blur", cancelStaleDragPreview);
+      window.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [dragPreview]);
+
+  function handleConnect(connection: Connection) {
+    const edge = createCanvasEdge(connection);
+
+    if (!edge) {
+      return;
+    }
+
+    onEdgesChange([{ type: "add", item: edge }]);
   }
 
-  function handleDrop(event: DragEvent<HTMLDivElement>) {
-    event.preventDefault();
+  function handleReconnect(oldEdge: CanvasEdge, connection: Connection) {
+    const edge = createCanvasEdge(
+      connection,
+      oldEdge.id,
+      oldEdge.selected,
+      oldEdge.data,
+    );
 
-    const payload =
-      parseShapeDragPayload(event.dataTransfer.getData(SHAPE_DRAG_MIME_TYPE)) ??
-      parseShapeTextPayload(event.dataTransfer.getData("text/plain"));
-
-    if (!payload) {
+    if (!edge) {
       return;
     }
 
-    const cursorPosition = screenToFlowPosition({
-      x: event.clientX,
-      y: event.clientY,
-    });
+    onEdgesChange([{ type: "replace", id: oldEdge.id, item: edge }]);
+  }
+
+  function addShapeNode(
+    payload: ShapeDragPayload,
+    cursor: { x: number; y: number },
+  ) {
+    const bounds = canvasRef.current?.getBoundingClientRect();
+
+    if (
+      !bounds ||
+      cursor.x < bounds.left ||
+      cursor.x > bounds.right ||
+      cursor.y < bounds.top ||
+      cursor.y > bounds.bottom
+    ) {
+      setDragPreview(null);
+      return;
+    }
+
+    const cursorPosition = screenToFlowPosition(cursor);
     const nodePosition = {
       x: cursorPosition.x - payload.size.width / 2,
       y: cursorPosition.y - payload.size.height / 2,
@@ -187,10 +587,57 @@ function CollaborativeFlowContent() {
     };
 
     onNodesChange([{ type: "add", item: node }]);
+    setDragPreview(null);
+  }
+
+  function handleDragOver(event: DragEvent<HTMLDivElement>) {
+    const transferTypes = Array.from(event.dataTransfer.types);
+    const isShapeDrag =
+      transferTypes.includes(SHAPE_DRAG_MIME_TYPE) ||
+      transferTypes.includes("text/plain");
+
+    if (!isShapeDrag) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "copy";
+    setDragPreview((current) =>
+      current
+        ? {
+            ...current,
+            cursor: {
+              x: event.clientX,
+              y: event.clientY,
+            },
+          }
+        : current,
+    );
+  }
+
+  function handleDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const payload =
+      parseShapeDragPayload(event.dataTransfer.getData(SHAPE_DRAG_MIME_TYPE)) ??
+      parseShapeTextPayload(event.dataTransfer.getData("text/plain"));
+
+    if (!payload) {
+      setDragPreview(null);
+      return;
+    }
+
+    addShapeNode(payload, {
+      x: event.clientX,
+      y: event.clientY,
+    });
   }
 
   return (
     <div
+      ref={canvasRef}
       className="h-full w-full bg-base"
       onDragOver={handleDragOver}
       onDrop={handleDrop}
@@ -198,14 +645,24 @@ function CollaborativeFlowContent() {
       <ReactFlow
         className="h-full w-full bg-base"
         connectionMode={ConnectionMode.Loose}
+        connectionLineStyle={CANVAS_EDGE_STYLE}
+        connectionLineType={ConnectionLineType.SmoothStep}
+        connectionRadius={32}
+        defaultEdgeOptions={DEFAULT_EDGE_OPTIONS}
         edges={edges}
+        edgeTypes={edgeTypes}
+        edgesReconnectable
         fitView
         nodes={nodes}
         nodeTypes={nodeTypes}
-        onConnect={onConnect}
+        onConnect={handleConnect}
         onDelete={onDelete}
+        onDragOver={handleDragOver}
+        onDrop={handleDrop}
         onEdgesChange={onEdgesChange}
         onNodesChange={onNodesChange}
+        onReconnect={handleReconnect}
+        reconnectRadius={18}
       >
         <Background
           color="var(--border-subtle)"
@@ -216,8 +673,13 @@ function CollaborativeFlowContent() {
         <MiniMap
           className="overflow-hidden rounded-xl border border-surface-border bg-base"
           maskColor="color-mix(in srgb, var(--bg-base) 72%, transparent)"
-          nodeColor="var(--bg-subtle)"
-          nodeStrokeColor="var(--border-subtle)"
+          nodeClassName={(node) => (node as CanvasNode).data.shape}
+          nodeColor={(node) => (node as CanvasNode).data.color.fill}
+          nodeComponent={MiniMapShapeNode}
+          nodeStrokeColor={(node) =>
+            node.selected ? "var(--accent-primary)" : "var(--border-subtle)"
+          }
+          nodeStrokeWidth={1.5}
           pannable
           style={{
             background: "var(--bg-base)",
@@ -225,13 +687,230 @@ function CollaborativeFlowContent() {
           zoomable
         />
         <Cursors />
-        <ShapePanel />
+        <CanvasControlBar
+          canRedo={canRedo}
+          canUndo={canUndo}
+          onFitView={handleFitView}
+          onRedo={handleRedo}
+          onUndo={handleUndo}
+          onZoomIn={handleZoomIn}
+          onZoomOut={handleZoomOut}
+        />
+        <ShapePanel
+          onDragCancel={() => setDragPreview(null)}
+          onDragMove={(cursor) =>
+            setDragPreview((current) =>
+              current
+                ? {
+                    ...current,
+                    cursor,
+                  }
+                : current,
+            )
+          }
+          onDragStart={setDragPreview}
+          onPointerDrop={addShapeNode}
+        />
+        {dragPreview ? <ShapeDragPreview preview={dragPreview} /> : null}
       </ReactFlow>
     </div>
   );
 }
 
-function ShapePanel() {
+function CanvasControlBar({
+  canRedo,
+  canUndo,
+  onFitView,
+  onRedo,
+  onUndo,
+  onZoomIn,
+  onZoomOut,
+}: {
+  canRedo: boolean;
+  canUndo: boolean;
+  onFitView: () => void;
+  onRedo: () => void;
+  onUndo: () => void;
+  onZoomIn: () => void;
+  onZoomOut: () => void;
+}) {
+  return (
+    <div className="nodrag nopan absolute bottom-5 left-5 z-20 flex items-center gap-1 rounded-full border border-surface-border bg-surface/95 p-1.5 shadow-2xl backdrop-blur">
+      <div className="flex items-center gap-1">
+        <CanvasControlButton label="Zoom out" onClick={onZoomOut}>
+          <ZoomOut className="h-4 w-4" />
+        </CanvasControlButton>
+        <CanvasControlButton label="Fit view" onClick={onFitView}>
+          <Maximize2 className="h-4 w-4" />
+        </CanvasControlButton>
+        <CanvasControlButton label="Zoom in" onClick={onZoomIn}>
+          <ZoomIn className="h-4 w-4" />
+        </CanvasControlButton>
+      </div>
+      <div className="mx-1 h-6 w-px bg-surface-border-subtle" />
+      <div className="flex items-center gap-1">
+        <CanvasControlButton
+          disabled={!canUndo}
+          label="Undo"
+          onClick={onUndo}
+        >
+          <Undo2 className="h-4 w-4" />
+        </CanvasControlButton>
+        <CanvasControlButton
+          disabled={!canRedo}
+          label="Redo"
+          onClick={onRedo}
+        >
+          <Redo2 className="h-4 w-4" />
+        </CanvasControlButton>
+      </div>
+    </div>
+  );
+}
+
+function CanvasControlButton({
+  children,
+  disabled = false,
+  label,
+  onClick,
+}: {
+  children: ReactNode;
+  disabled?: boolean;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      aria-label={label}
+      className="flex h-9 w-9 items-center justify-center rounded-full text-copy-muted transition hover:bg-accent-dim hover:text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-copy-muted"
+      disabled={disabled}
+      title={label}
+      type="button"
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  );
+}
+
+function ShapePanel({
+  onDragCancel,
+  onDragMove,
+  onDragStart,
+  onPointerDrop,
+}: ShapePanelProps) {
+  const [pointerDrag, setPointerDrag] = useState<ShapeDragPayload | null>(null);
+  const capturedPointerRef = useRef<{
+    element: HTMLButtonElement;
+    pointerId: number;
+  } | null>(null);
+
+  const cancelPointerDrag = useCallback(() => {
+    releaseCapturedPointer(capturedPointerRef.current);
+    capturedPointerRef.current = null;
+    setPointerDrag(null);
+    onDragCancel();
+  }, [onDragCancel]);
+
+  useEffect(() => {
+    if (!pointerDrag) {
+      return;
+    }
+
+    function handleKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") {
+        cancelPointerDrag();
+      }
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === "hidden") {
+        cancelPointerDrag();
+      }
+    }
+
+    window.addEventListener("blur", cancelPointerDrag);
+    window.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener("blur", cancelPointerDrag);
+      window.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [cancelPointerDrag, pointerDrag]);
+
+  function createShapePayload(shape: NodeShape): ShapeDragPayload {
+    return {
+      shape,
+      size: DEFAULT_NODE_SIZES[shape],
+    };
+  }
+
+  function handlePointerDown(
+    event: ReactPointerEvent<HTMLButtonElement>,
+    shape: NodeShape,
+  ) {
+    if (event.pointerType === "mouse" && event.button !== 0) {
+      return;
+    }
+
+    const payload = createShapePayload(shape);
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    capturedPointerRef.current = {
+      element: event.currentTarget,
+      pointerId: event.pointerId,
+    };
+    setPointerDrag(payload);
+    onDragStart({
+      ...payload,
+      cursor: {
+        x: event.clientX,
+        y: event.clientY,
+      },
+    });
+  }
+
+  function handlePointerMove(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (!pointerDrag) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    onDragMove({
+      x: event.clientX,
+      y: event.clientY,
+    });
+  }
+
+  function handlePointerDrop(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (!pointerDrag) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    releaseCapturedPointer(capturedPointerRef.current);
+    capturedPointerRef.current = null;
+    onPointerDrop(pointerDrag, {
+      x: event.clientX,
+      y: event.clientY,
+    });
+    setPointerDrag(null);
+  }
+
+  function handlePointerCancel() {
+    if (!pointerDrag) {
+      return;
+    }
+
+    cancelPointerDrag();
+  }
+
   return (
     <div className="nodrag nopan absolute bottom-5 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1 rounded-full border border-surface-border bg-surface/95 p-1.5 shadow-2xl backdrop-blur">
       {NODE_SHAPES.map((shape) => {
@@ -241,23 +920,14 @@ function ShapePanel() {
           <button
             key={shape}
             aria-label={`Drag ${shape} shape to canvas`}
-            className="nodrag nopan flex h-10 w-10 cursor-grab items-center justify-center rounded-full text-copy-muted transition hover:bg-accent-dim hover:text-brand active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-            draggable
+            className="nodrag nopan flex h-10 w-10 cursor-grab touch-none items-center justify-center rounded-full text-copy-muted transition hover:bg-accent-dim hover:text-brand active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+            draggable={false}
             title={shape}
             type="button"
-            onDragStart={(event) => {
-              const payload: ShapeDragPayload = {
-                shape,
-                size: DEFAULT_NODE_SIZES[shape],
-              };
-
-              event.dataTransfer.effectAllowed = "copy";
-              event.dataTransfer.setData(
-                SHAPE_DRAG_MIME_TYPE,
-                JSON.stringify(payload),
-              );
-              event.dataTransfer.setData("text/plain", shape);
-            }}
+            onPointerCancel={handlePointerCancel}
+            onPointerDown={(event) => handlePointerDown(event, shape)}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerDrop}
           >
             <Icon className="h-5 w-5" />
           </button>
@@ -267,46 +937,715 @@ function ShapePanel() {
   );
 }
 
-function CanvasNodeRenderer({ data, selected }: NodeProps<CanvasNode>) {
+function releaseCapturedPointer(
+  capturedPointer: {
+    element: HTMLButtonElement;
+    pointerId: number;
+  } | null,
+) {
+  if (!capturedPointer) {
+    return;
+  }
+
+  if (!capturedPointer.element.hasPointerCapture(capturedPointer.pointerId)) {
+    return;
+  }
+
+  capturedPointer.element.releasePointerCapture(capturedPointer.pointerId);
+}
+
+function CanvasNodeRenderer({ data, id, selected }: NodeProps<CanvasNode>) {
+  const [isEditing, setIsEditing] = useState(false);
+  const { updateNodeData } = useReactFlow<CanvasNode, CanvasEdge>();
+  const strokeColor = selected ? "var(--accent-primary)" : "var(--border-subtle)";
+
+  function handleLabelChange(value: string) {
+    updateNodeData(id, { label: value });
+  }
+
+  function handleColorChange(color: NodeColor) {
+    updateNodeData(id, { color });
+  }
+
+  return (
+    <>
+      <NodeColorToolbar
+        activeColor={data.color}
+        isVisible={selected}
+        nodeId={id}
+        onColorChange={handleColorChange}
+      />
+      <NodeResizer
+        color="var(--accent-primary)"
+        handleStyle={nodeResizerHandleStyle}
+        isVisible={selected}
+        lineStyle={nodeResizerLineStyle}
+        minHeight={MIN_NODE_HEIGHT}
+        minWidth={MIN_NODE_WIDTH}
+        nodeId={id}
+      />
+      <NodeShapeFrame
+        color={data.color.fill}
+        isEditing={isEditing}
+        label={data.label}
+        selected={selected}
+        shape={data.shape}
+        strokeColor={strokeColor}
+        textColor={data.color.text}
+        onEditEnd={() => setIsEditing(false)}
+        onEditStart={() => setIsEditing(true)}
+        onLabelChange={handleLabelChange}
+      />
+    </>
+  );
+}
+
+function NodeColorToolbar({
+  activeColor,
+  isVisible,
+  nodeId,
+  onColorChange,
+}: {
+  activeColor: NodeColor;
+  isVisible: boolean;
+  nodeId: string;
+  onColorChange: (color: NodeColor) => void;
+}) {
+  return (
+    <NodeToolbar
+      className="nodrag nopan nowheel z-20"
+      isVisible={isVisible}
+      nodeId={nodeId}
+      offset={14}
+      position={Position.Top}
+    >
+      <div
+        className="flex items-center gap-1 rounded-full border border-surface-border bg-surface/95 p-1 shadow-xl backdrop-blur"
+        onDoubleClick={(event) => event.stopPropagation()}
+        onMouseDown={(event) => event.stopPropagation()}
+        onPointerDown={(event) => event.stopPropagation()}
+      >
+        {NODE_COLORS.map((color) => {
+          const isActive =
+            activeColor.fill === color.fill && activeColor.text === color.text;
+
+          return (
+            <button
+              key={`${color.fill}-${color.text}`}
+              aria-label={`Use node color ${color.fill}`}
+              aria-pressed={isActive}
+              className={cn(
+                "h-6 w-6 rounded-full border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background hover:ring-2 hover:ring-[var(--swatch-glow)]",
+                isActive && "scale-110 ring-2 ring-[var(--swatch-glow)]",
+              )}
+              style={
+                {
+                  "--swatch-glow": color.text,
+                  backgroundColor: color.fill,
+                  borderColor: isActive ? color.text : "var(--border-subtle)",
+                } as CSSProperties
+              }
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onColorChange(color);
+              }}
+            />
+          );
+        })}
+      </div>
+    </NodeToolbar>
+  );
+}
+
+function ShapeDragPreview({ preview }: { preview: ShapeDragPreviewState }) {
+  return (
+    <div
+      className="pointer-events-none fixed left-0 top-0 z-50 opacity-70"
+      style={{
+        height: preview.size.height,
+        transform: `translate3d(${preview.cursor.x - preview.size.width / 2}px, ${
+          preview.cursor.y - preview.size.height / 2
+        }px, 0)`,
+        width: preview.size.width,
+      }}
+    >
+      <NodeShapeFrame
+        color={DEFAULT_NODE_COLOR.fill}
+        label=""
+        selected={false}
+        shape={preview.shape}
+        strokeColor="var(--accent-primary)"
+        textColor={DEFAULT_NODE_COLOR.text}
+      />
+    </div>
+  );
+}
+
+function NodeShapeFrame({
+  color,
+  isEditing = false,
+  label,
+  onEditEnd,
+  onEditStart,
+  onLabelChange,
+  selected,
+  shape,
+  strokeColor,
+  textColor,
+}: {
+  color: string;
+  isEditing?: boolean;
+  label: string;
+  onEditEnd?: () => void;
+  onEditStart?: () => void;
+  onLabelChange?: (value: string) => void;
+  selected: boolean;
+  shape: NodeShape;
+  strokeColor: string;
+  textColor: string;
+}) {
+  const visibleLabel = label.trim() ? label : "label";
+
+  function handleLabelChange(event: ChangeEvent<HTMLTextAreaElement>) {
+    onLabelChange?.(event.target.value);
+  }
+
+  function handleLabelKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    event.stopPropagation();
+
+    if (event.key !== "Escape") {
+      return;
+    }
+
+    event.preventDefault();
+    event.currentTarget.blur();
+  }
+
   return (
     <div
       className={cn(
-        "group relative flex h-full w-full items-center justify-center rounded-xl border px-4 text-center text-sm font-medium shadow-lg",
-        selected && "outline outline-2 outline-brand",
+        "group relative h-full w-full text-sm font-medium",
+        selected && "drop-shadow-[0_0_16px_var(--accent-primary-dim)]",
       )}
-      style={{
-        backgroundColor: data.color.fill,
-        borderColor: "var(--border-subtle)",
-        color: data.color.text,
-      }}
+      style={{ color: textColor }}
     >
-      <Handle
-        className="opacity-0 transition group-hover:opacity-100"
-        position={Position.Top}
-        style={handleStyle}
-        type="source"
-      />
-      <Handle
-        className="opacity-0 transition group-hover:opacity-100"
-        position={Position.Right}
-        style={handleStyle}
-        type="source"
-      />
-      <Handle
-        className="opacity-0 transition group-hover:opacity-100"
-        position={Position.Bottom}
-        style={handleStyle}
-        type="source"
-      />
-      <Handle
-        className="opacity-0 transition group-hover:opacity-100"
-        position={Position.Left}
-        style={handleStyle}
-        type="source"
-      />
-      <span className="min-w-0 truncate">{data.label}</span>
+      <NodeShapeSurface color={color} shape={shape} strokeColor={strokeColor} />
+      {isEditing ? (
+        <textarea
+          aria-label="Node label"
+          autoFocus
+          className="nodrag nopan nowheel absolute inset-x-3 top-1/2 z-10 max-h-[calc(100%-1rem)] min-h-5 -translate-y-1/2 resize-none overflow-hidden border-0 bg-transparent px-1 text-center text-sm font-medium leading-5 outline-none [field-sizing:content]"
+          rows={1}
+          spellCheck={false}
+          value={label}
+          onBlur={onEditEnd}
+          onChange={handleLabelChange}
+          onDoubleClick={(event) => event.stopPropagation()}
+          onKeyDown={handleLabelKeyDown}
+          onMouseDown={(event) => event.stopPropagation()}
+          onPointerDown={(event) => event.stopPropagation()}
+        />
+      ) : (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-4 text-center">
+          <button
+            aria-label="Edit node label"
+            className="nodrag nopan pointer-events-auto min-w-0 cursor-text focus-visible:outline-none"
+            type="button"
+            onDoubleClick={(event) => {
+              event.stopPropagation();
+              onEditStart?.();
+            }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <span
+              className={cn(
+                "block min-w-0 truncate",
+                !label.trim() && "opacity-55",
+              )}
+            >
+              {visibleLabel}
+            </span>
+          </button>
+        </div>
+      )}
+      <NodeHandles />
     </div>
   );
+}
+
+function NodeShapeSurface({
+  color,
+  shape,
+  strokeColor,
+}: {
+  color: string;
+  shape: NodeShape;
+  strokeColor: string;
+}) {
+  if (shape === "diamond") {
+    return (
+      <svg
+        aria-hidden="true"
+        className="absolute inset-0 h-full w-full overflow-visible"
+        preserveAspectRatio="none"
+        viewBox="0 0 100 100"
+      >
+        <polygon
+          fill={color}
+          points="50,2 98,50 50,98 2,50"
+          stroke={strokeColor}
+          strokeWidth={NODE_SURFACE_STROKE_WIDTH}
+          vectorEffect="non-scaling-stroke"
+        />
+      </svg>
+    );
+  }
+
+  if (shape === "hexagon") {
+    return (
+      <svg
+        aria-hidden="true"
+        className="absolute inset-0 h-full w-full overflow-visible"
+        preserveAspectRatio="none"
+        viewBox="0 0 100 100"
+      >
+        <polygon
+          fill={color}
+          points="25,3 75,3 98,50 75,97 25,97 2,50"
+          stroke={strokeColor}
+          strokeWidth={NODE_SURFACE_STROKE_WIDTH}
+          vectorEffect="non-scaling-stroke"
+        />
+      </svg>
+    );
+  }
+
+  if (shape === "cylinder") {
+    return (
+      <svg
+        aria-hidden="true"
+        className="absolute inset-0 h-full w-full overflow-visible"
+        preserveAspectRatio="none"
+        viewBox="0 0 100 100"
+      >
+        <path
+          d="M0 16C0 7.2 22.4 0 50 0s50 7.2 50 16v68c0 8.8-22.4 16-50 16S0 92.8 0 84Z"
+          fill={color}
+          stroke={strokeColor}
+          strokeWidth={NODE_SURFACE_STROKE_WIDTH}
+          vectorEffect="non-scaling-stroke"
+        />
+        <ellipse
+          cx="50"
+          cy="16"
+          fill="none"
+          rx="50"
+          ry="16"
+          stroke={strokeColor}
+          strokeWidth={NODE_SURFACE_STROKE_WIDTH}
+          vectorEffect="non-scaling-stroke"
+        />
+      </svg>
+    );
+  }
+
+  return (
+    <div
+      className={cn(
+        "absolute inset-0 border",
+        shape === "circle" && "rounded-full",
+        shape === "pill" && "rounded-full",
+        shape === "rectangle" && "rounded-xl",
+      )}
+      style={{
+        backgroundColor: color,
+        borderColor: strokeColor,
+        borderWidth: NODE_SURFACE_STROKE_WIDTH,
+      }}
+    />
+  );
+}
+
+function NodeHandles() {
+  return (
+    <>
+      {HANDLE_SIDES.map(({ id, position }) => (
+        <Handle
+          key={id}
+          id={id}
+          className="opacity-0 transition group-hover:opacity-100"
+          isConnectableEnd
+          isConnectableStart
+          position={position}
+          style={handleStyle}
+          type="source"
+        />
+      ))}
+    </>
+  );
+}
+
+function CanvasEdgeRenderer({
+  data,
+  id,
+  markerEnd,
+  selected,
+  sourcePosition,
+  sourceX,
+  sourceY,
+  style,
+  targetPosition,
+  targetX,
+  targetY,
+}: EdgeProps<CanvasEdge>) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [isHovered, setIsHovered] = useState(false);
+  const [draftLabel, setDraftLabel] = useState(data?.label ?? "");
+  const { updateEdgeData } = useReactFlow<CanvasNode, CanvasEdge>();
+  const [edgePath, labelX, labelY] = getSmoothStepPath({
+    sourceX,
+    sourceY,
+    sourcePosition,
+    targetX,
+    targetY,
+    targetPosition,
+    borderRadius: 8,
+    offset: 24,
+  });
+  const label = data?.label ?? "";
+  const isActive = selected || isHovered || isEditing;
+  const visibleLabel = label.trim();
+
+  function startEditing() {
+    setDraftLabel(label);
+    setIsEditing(true);
+  }
+
+  function saveLabel() {
+    updateEdgeData(id, { label: draftLabel });
+    setIsEditing(false);
+  }
+
+  function handleLabelKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    event.stopPropagation();
+
+    if (event.key !== "Enter" && event.key !== "Escape") {
+      return;
+    }
+
+    event.preventDefault();
+    saveLabel();
+  }
+
+  function stopCanvasInteraction(
+    event: ReactMouseEvent<HTMLElement> | KeyboardEvent<HTMLInputElement>,
+  ) {
+    event.stopPropagation();
+  }
+
+  return (
+    <>
+      <path
+        className="react-flow__edge-interaction"
+        d={edgePath}
+        fill="none"
+        stroke="transparent"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth={28}
+        onDoubleClick={(event) => {
+          event.stopPropagation();
+          startEditing();
+        }}
+        onMouseEnter={() => setIsHovered(true)}
+        onMouseLeave={() => setIsHovered(false)}
+      />
+      <BaseEdge
+        id={id}
+        interactionWidth={0}
+        markerEnd={markerEnd}
+        path={edgePath}
+        style={{
+          ...style,
+          opacity: isActive ? 0.98 : 0.56,
+          stroke: isActive ? "var(--text-primary)" : "var(--text-secondary)",
+          strokeLinecap: "round",
+          strokeLinejoin: "round",
+          strokeWidth: isActive ? 2 : 1.6,
+        }}
+      />
+      <EdgeLabelRenderer>
+        <div
+          className="nodrag nopan nowheel absolute"
+          style={{
+            pointerEvents: "all",
+            transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
+          }}
+        >
+          {isEditing ? (
+            <input
+              aria-label="Edge label"
+              autoFocus
+              className="min-h-7 rounded-full border border-surface-border bg-surface px-2.5 py-1 text-center text-xs font-medium text-copy-primary shadow-xl outline-none [field-sizing:content] placeholder:text-copy-faint focus:border-brand"
+              size={Math.max(draftLabel.length, 4)}
+              spellCheck={false}
+              value={draftLabel}
+              onBlur={saveLabel}
+              onChange={(event) => setDraftLabel(event.target.value)}
+              onDoubleClick={stopCanvasInteraction}
+              onKeyDown={handleLabelKeyDown}
+              onMouseDown={stopCanvasInteraction}
+              onPointerDown={(event) => event.stopPropagation()}
+            />
+          ) : visibleLabel ? (
+            <button
+              className="rounded-full border border-surface-border bg-surface/95 px-2.5 py-1 text-xs font-medium text-copy-secondary shadow-lg backdrop-blur transition hover:border-brand hover:text-copy-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+              type="button"
+              onDoubleClick={(event) => {
+                event.stopPropagation();
+                startEditing();
+              }}
+              onMouseDown={stopCanvasInteraction}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              {visibleLabel}
+            </button>
+          ) : isActive ? (
+            <button
+              className="rounded-full border border-surface-border bg-surface/80 px-2.5 py-1 text-xs font-medium text-copy-faint shadow-lg backdrop-blur transition hover:border-brand hover:text-copy-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+              type="button"
+              onDoubleClick={(event) => {
+                event.stopPropagation();
+                startEditing();
+              }}
+              onMouseDown={stopCanvasInteraction}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              label
+            </button>
+          ) : null}
+        </div>
+      </EdgeLabelRenderer>
+    </>
+  );
+}
+
+function MiniMapShapeNode({
+  id,
+  x,
+  y,
+  width,
+  height,
+  className,
+  color = "var(--bg-subtle)",
+  strokeColor = "var(--border-subtle)",
+  strokeWidth = 1.5,
+  onClick,
+}: MiniMapNodeShapeProps) {
+  const shape = getMiniMapShape(className);
+  const clickHandler = onClick
+    ? (event: ReactMouseEvent) => onClick(event, id)
+    : undefined;
+  const style = createMiniMapNodeStyle(color, strokeColor, strokeWidth);
+
+  if (shape === "diamond") {
+    return (
+      <polygon
+        className="react-flow__minimap-node"
+        fill={color}
+        points={`${x + width / 2},${y} ${x + width},${y + height / 2} ${
+          x + width / 2
+        },${y + height} ${x},${y + height / 2}`}
+        stroke={strokeColor}
+        strokeWidth={strokeWidth}
+        style={style}
+        vectorEffect="non-scaling-stroke"
+        onClick={clickHandler}
+      />
+    );
+  }
+
+  if (shape === "hexagon") {
+    return (
+      <polygon
+        className="react-flow__minimap-node"
+        fill={color}
+        points={`${x + width * 0.25},${y} ${x + width * 0.75},${y} ${
+          x + width
+        },${y + height / 2} ${x + width * 0.75},${y + height} ${
+          x + width * 0.25
+        },${y + height} ${x},${y + height / 2}`}
+        stroke={strokeColor}
+        strokeWidth={strokeWidth}
+        style={style}
+        vectorEffect="non-scaling-stroke"
+        onClick={clickHandler}
+      />
+    );
+  }
+
+  if (shape === "cylinder") {
+    const radiusY = Math.max(4, Math.min(height * 0.18, 12));
+
+    return (
+      <g
+        className="react-flow__minimap-node"
+        style={style}
+        onClick={clickHandler}
+      >
+        <path
+          d={`M${x},${y + radiusY}C${x},${y + radiusY / 2} ${
+            x + width * 0.25
+          },${y} ${x + width / 2},${y}s${width / 2},${radiusY / 2} ${
+            width / 2
+          },${radiusY}v${height - radiusY * 2}C${x + width},${
+            y + height - radiusY / 2
+          } ${x + width * 0.75},${y + height} ${x + width / 2},${
+            y + height
+          }S${x},${y + height - radiusY / 2} ${x},${
+            y + height - radiusY
+          }Z`}
+          fill={color}
+          stroke={strokeColor}
+          strokeWidth={strokeWidth}
+          vectorEffect="non-scaling-stroke"
+        />
+        <ellipse
+          cx={x + width / 2}
+          cy={y + radiusY}
+          fill="none"
+          rx={width / 2}
+          ry={radiusY}
+          stroke={strokeColor}
+          strokeWidth={strokeWidth}
+          vectorEffect="non-scaling-stroke"
+        />
+      </g>
+    );
+  }
+
+  if (shape === "circle") {
+    return (
+      <ellipse
+        className="react-flow__minimap-node"
+        cx={x + width / 2}
+        cy={y + height / 2}
+        fill={color}
+        rx={width / 2}
+        ry={height / 2}
+        stroke={strokeColor}
+        strokeWidth={strokeWidth}
+        style={style}
+        vectorEffect="non-scaling-stroke"
+        onClick={clickHandler}
+      />
+    );
+  }
+
+  return (
+    <rect
+      className="react-flow__minimap-node"
+      fill={color}
+      height={height}
+      rx={shape === "pill" ? height / 2 : 6}
+      ry={shape === "pill" ? height / 2 : 6}
+      stroke={strokeColor}
+      strokeWidth={strokeWidth}
+      style={style}
+      vectorEffect="non-scaling-stroke"
+      width={width}
+      x={x}
+      y={y}
+      onClick={clickHandler}
+    />
+  );
+}
+
+function createMiniMapNodeStyle(
+  color: string,
+  strokeColor: string,
+  strokeWidth: number,
+) {
+  return {
+    "--xy-minimap-node-background-color-props": color,
+    "--xy-minimap-node-stroke-color-props": strokeColor,
+    "--xy-minimap-node-stroke-width-props": strokeWidth,
+  } as CSSProperties;
+}
+
+function getMiniMapShape(className: string): NodeShape {
+  const shape = NODE_SHAPES.find((nodeShape) =>
+    className.split(" ").includes(nodeShape),
+  );
+
+  return shape ?? "rectangle";
+}
+
+function createCanvasEdge(
+  connection: Connection,
+  id = createCanvasEdgeId(connection),
+  selected = false,
+  data = { label: "" },
+): CanvasEdge | null {
+  if (!connection.source || !connection.target) {
+    return null;
+  }
+
+  return {
+    id,
+    source: connection.source,
+    sourceHandle: connection.sourceHandle,
+    target: connection.target,
+    targetHandle: connection.targetHandle,
+    data,
+    selected,
+    markerEnd: CANVAS_EDGE_MARKER,
+    reconnectable: true,
+    style: CANVAS_EDGE_STYLE,
+    type: "canvasEdge",
+  };
+}
+
+function createCanvasEdgeId(connection: Connection): string {
+  return `edge-${connection.source}-${connection.sourceHandle ?? "node"}-${
+    connection.target
+  }-${connection.targetHandle ?? "node"}-${Date.now()}`;
+}
+
+function cloneTemplateNode(node: CanvasNode): CanvasNode {
+  return {
+    ...node,
+    data: {
+      ...node.data,
+      color: {
+        ...node.data.color,
+      },
+    },
+    position: {
+      ...node.position,
+    },
+    style: node.style
+      ? {
+          ...node.style,
+        }
+      : undefined,
+  };
+}
+
+function cloneTemplateEdge(edge: CanvasEdge): CanvasEdge {
+  return {
+    ...edge,
+    data: {
+      label: edge.data?.label ?? "",
+    },
+    markerEnd: CANVAS_EDGE_MARKER,
+    reconnectable: true,
+    selected: false,
+    style: CANVAS_EDGE_STYLE,
+    type: "canvasEdge",
+  };
 }
 
 function parseShapeDragPayload(value: string): ShapeDragPayload | null {
