@@ -1,4 +1,4 @@
-import { get, put } from "@vercel/blob";
+import { del, get, put } from "@vercel/blob";
 
 import {
   type CanvasSaveResponse,
@@ -14,6 +14,19 @@ interface CanvasRouteContext {
   params: Promise<{
     projectId: string;
   }>;
+}
+
+function getPrismaErrorCode(error: unknown) {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string"
+  ) {
+    return error.code;
+  }
+
+  return null;
 }
 
 export async function GET(_request: Request, context: CanvasRouteContext) {
@@ -90,6 +103,14 @@ export async function PUT(request: Request, context: CanvasRouteContext) {
     return apiError(403, "forbidden", "You do not have access to this project.");
   }
 
+  if (accessRole !== "owner") {
+    return apiError(
+      403,
+      "forbidden",
+      "Only the project owner can save canvas snapshots.",
+    );
+  }
+
   let body: unknown;
 
   try {
@@ -120,10 +141,33 @@ export async function PUT(request: Request, context: CanvasRouteContext) {
     );
   }
 
-  await prisma.project.update({
-    where: { id: projectId },
-    data: { canvasJSONPath: blob.url },
-  });
+  try {
+    await prisma.project.update({
+      where: { id: projectId },
+      data: { canvasJSONPath: blob.url },
+    });
+  } catch (error: unknown) {
+    console.error("Canvas database update failed after blob upload", error);
+
+    try {
+      await del(blob.url);
+    } catch (cleanupError: unknown) {
+      console.error("Canvas blob cleanup failed after database update error", {
+        cleanupError,
+        url: blob.url,
+      });
+    }
+
+    if (getPrismaErrorCode(error) === "P2025") {
+      return apiError(404, "project_not_found", "Project not found.");
+    }
+
+    return apiError(
+      409,
+      "canvas_update_failed",
+      "Canvas was uploaded but could not be linked to the project.",
+    );
+  }
 
   return Response.json({
     canvasJSONPath: blob.url,

@@ -167,7 +167,7 @@ export function EditorWorkspaceClient({
           <Button
             aria-label={isAiSidebarOpen ? "Close AI sidebar" : "Open AI sidebar"}
             className={cn(
-              "hidden border border-ai/40 bg-ai/15 text-ai-text shadow-2xl hover:bg-ai/25 hover:text-ai-text lg:flex",
+              "border border-ai/40 bg-ai/15 text-ai-text shadow-2xl hover:bg-ai/25 hover:text-ai-text",
               isAiSidebarOpen && "bg-ai/25",
             )}
             type="button"
@@ -195,6 +195,7 @@ export function EditorWorkspaceClient({
         <section className="absolute inset-0 bg-base">
           <LiveblocksCanvas
             ref={canvasRef}
+            canSaveCanvas={canManageAccess}
             isAiSidebarOpen={isAiSidebarOpen}
             onManualSaveReady={handleManualSaveReady}
             onSaveStatusChange={handleSaveStatusChange}

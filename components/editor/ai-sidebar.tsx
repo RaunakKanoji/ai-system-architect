@@ -39,6 +39,7 @@ const starterPrompts = [
 export function AiSidebar({ isOpen, onClose }: AiSidebarProps) {
   const [draft, setDraft] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
   const nextMessageId = useRef(1);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -52,6 +53,10 @@ export function AiSidebar({ isOpen, onClose }: AiSidebarProps) {
     textarea.style.height = "72px";
     textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`;
   }, [draft]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ block: "end" });
+  }, [messages]);
 
   function sendMessage(content: string) {
     const trimmedContent = content.trim();
@@ -86,7 +91,11 @@ export function AiSidebar({ isOpen, onClose }: AiSidebarProps) {
   }
 
   function handleTextareaKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (
+      event.key === "Enter" &&
+      !event.shiftKey &&
+      !event.nativeEvent.isComposing
+    ) {
       event.preventDefault();
       handleSubmit();
     }
@@ -95,7 +104,7 @@ export function AiSidebar({ isOpen, onClose }: AiSidebarProps) {
   return (
     <aside
       className={cn(
-        "absolute bottom-4 right-4 top-4 z-30 hidden w-[min(22rem,calc(100vw-2rem))] flex-col rounded-2xl border border-surface-border bg-base/95 shadow-2xl backdrop-blur transition-all duration-200 ease-out lg:flex",
+        "absolute bottom-4 right-4 top-4 z-30 flex w-[min(22rem,calc(100vw-2rem))] flex-col rounded-2xl border border-surface-border bg-base/95 shadow-2xl backdrop-blur transition-all duration-200 ease-out",
         isOpen
           ? "translate-x-0 opacity-100"
           : "pointer-events-none translate-x-[calc(100%+1rem)] opacity-0",
@@ -190,6 +199,7 @@ export function AiSidebar({ isOpen, onClose }: AiSidebarProps) {
                 </div>
               ))
             )}
+            <div ref={messagesEndRef} aria-hidden="true" />
           </div>
 
           <div className="border-t border-surface-border p-4">

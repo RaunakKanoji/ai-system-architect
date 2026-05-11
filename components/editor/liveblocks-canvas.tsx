@@ -208,6 +208,7 @@ interface ParticipantSummary {
 }
 
 interface LiveblocksCanvasProps {
+  canSaveCanvas: boolean;
   isAiSidebarOpen: boolean;
   onManualSaveReady: (saveNow: (() => Promise<void>) | null) => void;
   onSaveStatusChange: (status: CanvasSaveStatus) => void;
@@ -245,7 +246,7 @@ export const LiveblocksCanvas = forwardRef<
   LiveblocksCanvasHandle,
   LiveblocksCanvasProps
 >(function LiveblocksCanvas(
-  { isAiSidebarOpen, onManualSaveReady, onSaveStatusChange, roomId },
+  { canSaveCanvas, isAiSidebarOpen, onManualSaveReady, onSaveStatusChange, roomId },
   ref,
 ) {
   const { isLoaded, isSignedIn, userId } = useAuth();
@@ -347,6 +348,7 @@ export const LiveblocksCanvas = forwardRef<
             {() => (
               <CollaborativeFlow
                 currentUserId={userId}
+                canSaveCanvas={canSaveCanvas}
                 importRequest={templateImportRequest}
                 isAiSidebarOpen={isAiSidebarOpen}
                 onManualSaveReady={handleManualSaveReady}
@@ -428,6 +430,10 @@ function isString(value: string | null): value is string {
   return typeof value === "string";
 }
 
+function formatCssUrl(value: string) {
+  return `url(${JSON.stringify(value)})`;
+}
+
 function isEditableKeyboardTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) {
     return false;
@@ -490,6 +496,7 @@ class CanvasErrorBoundary extends Component<
 }
 
 function CollaborativeFlow({
+  canSaveCanvas,
   currentUserId,
   importRequest,
   isAiSidebarOpen,
@@ -497,6 +504,7 @@ function CollaborativeFlow({
   onSaveStatusChange,
   roomId,
 }: {
+  canSaveCanvas: boolean;
   currentUserId: string;
   importRequest: TemplateImportRequest | null;
   isAiSidebarOpen: boolean;
@@ -507,6 +515,7 @@ function CollaborativeFlow({
   return (
     <ReactFlowProvider>
       <CollaborativeFlowContent
+        canSaveCanvas={canSaveCanvas}
         currentUserId={currentUserId}
         importRequest={importRequest}
         isAiSidebarOpen={isAiSidebarOpen}
@@ -519,6 +528,7 @@ function CollaborativeFlow({
 }
 
 function CollaborativeFlowContent({
+  canSaveCanvas,
   currentUserId,
   importRequest,
   isAiSidebarOpen,
@@ -526,6 +536,7 @@ function CollaborativeFlowContent({
   onSaveStatusChange,
   roomId,
 }: {
+  canSaveCanvas: boolean;
   currentUserId: string;
   importRequest: TemplateImportRequest | null;
   isAiSidebarOpen: boolean;
@@ -563,7 +574,7 @@ function CollaborativeFlowContent({
     });
   const { saveNow, status: saveStatus } = useCanvasAutosave({
     edges,
-    enabled: isCanvasLoadReady,
+    enabled: isCanvasLoadReady && canSaveCanvas,
     nodes,
     projectId: roomId,
   });
@@ -724,11 +735,17 @@ function CollaborativeFlowContent({
     }
 
     function handleDocumentKeyDown(event: globalThis.KeyboardEvent) {
-      if (canvasWrapper.contains(event.target as Node | null)) {
+      const target = event.target as Node | null;
+      const activeElement = document.activeElement;
+
+      if (canvasWrapper.contains(target)) {
         return;
       }
 
-      if (!isCanvasKeyboardActiveRef.current) {
+      if (
+        !isCanvasKeyboardActiveRef.current ||
+        !canvasWrapper.contains(activeElement)
+      ) {
         return;
       }
 
@@ -757,12 +774,12 @@ function CollaborativeFlowContent({
   }, [onSaveStatusChange, saveStatus]);
 
   useEffect(() => {
-    onManualSaveReady(isCanvasLoadReady ? saveNow : null);
+    onManualSaveReady(isCanvasLoadReady && canSaveCanvas ? saveNow : null);
 
     return () => {
       onManualSaveReady(null);
     };
-  }, [isCanvasLoadReady, onManualSaveReady, saveNow]);
+  }, [canSaveCanvas, isCanvasLoadReady, onManualSaveReady, saveNow]);
 
   useEffect(() => {
     if (
@@ -1302,7 +1319,7 @@ function CollaboratorAvatar({
       style={
         participant.avatarUrl
           ? {
-              backgroundImage: `url(${participant.avatarUrl})`,
+              backgroundImage: formatCssUrl(participant.avatarUrl),
               backgroundPosition: "center",
               backgroundSize: "cover",
             }

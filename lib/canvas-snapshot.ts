@@ -1,4 +1,5 @@
 import type { CanvasSnapshot } from "@/types/canvas";
+import { NODE_COLORS, NODE_SHAPES } from "@/types/canvas";
 
 export interface CanvasSnapshotResponse {
   canvas: CanvasSnapshot | null;
@@ -30,18 +31,19 @@ function isCanvasNodeSnapshot(value: unknown) {
     return false;
   }
 
-  if (typeof value.id !== "string" || typeof value.type !== "string") {
+  if (typeof value.id !== "string" || value.type !== "canvasNode") {
     return false;
   }
 
-  if (!isRecord(value.position)) {
+  if (!isRecord(value.position) || !isCanvasNodeDataSnapshot(value.data)) {
     return false;
   }
 
   return (
-    typeof value.position.x === "number" &&
-    typeof value.position.y === "number" &&
-    isRecord(value.data)
+    isFiniteNumber(value.position.x) &&
+    isFiniteNumber(value.position.y) &&
+    isOptionalFiniteNumber(value.width) &&
+    isOptionalFiniteNumber(value.height)
   );
 }
 
@@ -52,7 +54,56 @@ function isCanvasEdgeSnapshot(value: unknown) {
 
   return (
     typeof value.id === "string" &&
+    value.type === "canvasEdge" &&
     typeof value.source === "string" &&
-    typeof value.target === "string"
+    typeof value.target === "string" &&
+    isOptionalStringOrNull(value.sourceHandle) &&
+    isOptionalStringOrNull(value.targetHandle) &&
+    isCanvasEdgeDataSnapshot(value.data)
+  );
+}
+
+function isCanvasNodeDataSnapshot(value: unknown) {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return (
+    typeof value.label === "string" &&
+    isNodeShape(value.shape) &&
+    isNodeColor(value.color)
+  );
+}
+
+function isCanvasEdgeDataSnapshot(value: unknown) {
+  return isRecord(value) && typeof value.label === "string";
+}
+
+function isFiniteNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isOptionalFiniteNumber(value: unknown) {
+  return value === undefined || isFiniteNumber(value);
+}
+
+function isOptionalStringOrNull(value: unknown) {
+  return value === undefined || value === null || typeof value === "string";
+}
+
+function isNodeShape(value: unknown) {
+  return (
+    typeof value === "string" &&
+    (NODE_SHAPES as readonly string[]).includes(value)
+  );
+}
+
+function isNodeColor(value: unknown) {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return NODE_COLORS.some(
+    (color) => value.fill === color.fill && value.text === color.text,
   );
 }

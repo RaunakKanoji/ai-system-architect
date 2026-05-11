@@ -16,7 +16,7 @@ export interface AccessibleProject {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function firstNonEmptyString(...values: unknown[]): string | null {
@@ -73,7 +73,7 @@ export async function getCurrentProjectIdentity(): Promise<ProjectIdentity | nul
     sessionClaims.avatar_url,
   );
 
-  if (!primaryEmail || displayName === "Project collaborator" || !avatarUrl) {
+  if (!primaryEmail || displayName === "Project collaborator") {
     try {
       const user = await currentUser();
 
