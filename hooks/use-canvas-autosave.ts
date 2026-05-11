@@ -2,7 +2,10 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import type { CanvasSaveResponse } from "@/lib/canvas-snapshot";
+import type {
+  CanvasSaveResponse,
+  CanvasSnapshotResponse,
+} from "@/lib/canvas-snapshot";
 import type { CanvasEdge, CanvasNode, CanvasSnapshot } from "@/types/canvas";
 
 export type CanvasSaveStatus = "idle" | "saving" | "saved" | "error";
@@ -10,6 +13,7 @@ export type CanvasSaveStatus = "idle" | "saving" | "saved" | "error";
 const AUTOSAVE_DEBOUNCE_MS = 1200;
 
 interface UseCanvasAutosaveOptions {
+  canvasUpdatedAt: string | null;
   edges: CanvasEdge[];
   enabled: boolean;
   nodes: CanvasNode[];
@@ -27,6 +31,7 @@ interface SaveCurrentCanvasOptions {
 }
 
 export function useCanvasAutosave({
+  canvasUpdatedAt,
   edges,
   enabled,
   nodes,
@@ -36,6 +41,7 @@ export function useCanvasAutosave({
   const enabledRef = useRef(enabled);
   const latestSnapshotRef = useRef<CanvasSnapshot>({ nodes, edges });
   const lastSavedPayloadRef = useRef<string | null>(null);
+  const canvasUpdatedAtRef = useRef<string | null>(canvasUpdatedAt);
   const projectIdRef = useRef(projectId);
 
   useLayoutEffect(() => {
@@ -45,8 +51,9 @@ export function useCanvasAutosave({
   }, [edges, enabled, nodes, projectId]);
 
   useEffect(() => {
+    canvasUpdatedAtRef.current = canvasUpdatedAt;
     lastSavedPayloadRef.current = null;
-  }, [projectId]);
+  }, [canvasUpdatedAt, projectId]);
 
   const saveCurrentCanvas = useCallback(
     async ({ signal, throwOnError = false }: SaveCurrentCanvasOptions = {}) => {
@@ -60,7 +67,18 @@ export function useCanvasAutosave({
       setStatus("saving");
 
       try {
-        await saveCanvas(projectIdRef.current, payload, signal);
+        const projectId = projectIdRef.current;
+        const expectedCanvasUpdatedAt =
+          canvasUpdatedAtRef.current ??
+          (await loadCanvasUpdatedAt(projectId, signal));
+        const response = await saveCanvas(
+          projectId,
+          snapshot,
+          expectedCanvasUpdatedAt,
+          signal,
+        );
+
+        canvasUpdatedAtRef.current = response.canvasUpdatedAt;
         lastSavedPayloadRef.current = payload;
         setStatus("saved");
       } catch (error: unknown) {
@@ -114,11 +132,12 @@ export function useCanvasAutosave({
 
 async function saveCanvas(
   projectId: string,
-  payload: string,
+  canvas: CanvasSnapshot,
+  expectedCanvasUpdatedAt: string,
   signal?: AbortSignal,
 ): Promise<CanvasSaveResponse> {
   const response = await fetch(`/api/projects/${projectId}/canvas`, {
-    body: payload,
+    body: JSON.stringify({ canvas, expectedCanvasUpdatedAt }),
     credentials: "include",
     headers: {
       "Content-Type": "application/json",
@@ -140,12 +159,49 @@ async function saveCanvas(
   return data;
 }
 
+async function loadCanvasUpdatedAt(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const response = await fetch(`/api/projects/${projectId}/canvas`, {
+    credentials: "include",
+    method: "GET",
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error("Canvas version could not be loaded.");
+  }
+
+  const data: unknown = await response.json();
+
+  if (!isCanvasSnapshotResponse(data)) {
+    throw new Error("Canvas version returned an invalid response.");
+  }
+
+  return data.canvasUpdatedAt;
+}
+
 function isCanvasSaveResponse(value: unknown): value is CanvasSaveResponse {
   return (
     typeof value === "object" &&
     value !== null &&
     !Array.isArray(value) &&
     "canvasJSONPath" in value &&
-    typeof value.canvasJSONPath === "string"
+    typeof value.canvasJSONPath === "string" &&
+    "canvasUpdatedAt" in value &&
+    typeof value.canvasUpdatedAt === "string"
+  );
+}
+
+function isCanvasSnapshotResponse(
+  value: unknown,
+): value is CanvasSnapshotResponse {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    "canvasUpdatedAt" in value &&
+    typeof value.canvasUpdatedAt === "string"
   );
 }

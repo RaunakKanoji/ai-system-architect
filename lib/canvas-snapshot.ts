@@ -3,10 +3,17 @@ import { NODE_COLORS, NODE_SHAPES } from "@/types/canvas";
 
 export interface CanvasSnapshotResponse {
   canvas: CanvasSnapshot | null;
+  canvasUpdatedAt: string;
 }
 
 export interface CanvasSaveResponse {
   canvasJSONPath: string;
+  canvasUpdatedAt: string;
+}
+
+export interface CanvasSaveRequest {
+  canvas: CanvasSnapshot;
+  expectedCanvasUpdatedAt: string;
 }
 
 export function isCanvasSnapshot(value: unknown): value is CanvasSnapshot {
@@ -19,6 +26,17 @@ export function isCanvasSnapshot(value: unknown): value is CanvasSnapshot {
     Array.isArray(value.edges) &&
     value.nodes.every(isCanvasNodeSnapshot) &&
     value.edges.every(isCanvasEdgeSnapshot)
+  );
+}
+
+export function isCanvasSaveRequest(
+  value: unknown,
+): value is CanvasSaveRequest {
+  return (
+    isRecord(value) &&
+    isCanvasSnapshot(value.canvas) &&
+    typeof value.expectedCanvasUpdatedAt === "string" &&
+    Number.isFinite(Date.parse(value.expectedCanvasUpdatedAt))
   );
 }
 

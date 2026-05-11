@@ -3,6 +3,7 @@ import { del, get, put } from "@vercel/blob";
 import {
   type CanvasSaveResponse,
   type CanvasSnapshotResponse,
+  isCanvasSaveRequest,
   isCanvasSnapshot,
 } from "@/lib/canvas-snapshot";
 import { prisma } from "@/lib/prisma";
@@ -45,7 +46,7 @@ export async function GET(_request: Request, context: CanvasRouteContext) {
 
   const project = await prisma.project.findUnique({
     where: { id: projectId },
-    select: { canvasJSONPath: true },
+    select: { canvasJSONPath: true, updatedAt: true },
   });
 
   if (!project) {
@@ -53,7 +54,10 @@ export async function GET(_request: Request, context: CanvasRouteContext) {
   }
 
   if (!project.canvasJSONPath) {
-    return Response.json({ canvas: null } satisfies CanvasSnapshotResponse);
+    return Response.json({
+      canvas: null,
+      canvasUpdatedAt: project.updatedAt.toISOString(),
+    } satisfies CanvasSnapshotResponse);
   }
 
   let canvas: unknown;
@@ -86,7 +90,10 @@ export async function GET(_request: Request, context: CanvasRouteContext) {
     return apiError(502, "invalid_canvas", "Saved canvas data is invalid.");
   }
 
-  return Response.json({ canvas } satisfies CanvasSnapshotResponse);
+  return Response.json({
+    canvas,
+    canvasUpdatedAt: project.updatedAt.toISOString(),
+  } satisfies CanvasSnapshotResponse);
 }
 
 export async function PUT(request: Request, context: CanvasRouteContext) {
@@ -119,14 +126,16 @@ export async function PUT(request: Request, context: CanvasRouteContext) {
     return apiError(400, "invalid_request", "A JSON request body is required.");
   }
 
-  if (!isCanvasSnapshot(body)) {
+  if (!isCanvasSaveRequest(body)) {
     return apiError(400, "invalid_canvas", "Canvas nodes and edges are required.");
   }
+
+  const expectedCanvasUpdatedAt = new Date(body.expectedCanvasUpdatedAt);
 
   let blob;
 
   try {
-    blob = await put(`canvas/${projectId}.json`, JSON.stringify(body), {
+    blob = await put(`canvas/${projectId}.json`, JSON.stringify(body.canvas), {
       access: "private",
       allowOverwrite: true,
       cacheControlMaxAge: 60,
@@ -142,10 +151,14 @@ export async function PUT(request: Request, context: CanvasRouteContext) {
   }
 
   try {
-    await prisma.project.update({
-      where: { id: projectId },
+    const updateResult = await prisma.project.updateMany({
+      where: { id: projectId, updatedAt: expectedCanvasUpdatedAt },
       data: { canvasJSONPath: blob.url },
     });
+
+    if (updateResult.count === 0) {
+      throw new Error("canvas_update_conflict");
+    }
   } catch (error: unknown) {
     console.error("Canvas database update failed after blob upload", error);
 
@@ -158,7 +171,12 @@ export async function PUT(request: Request, context: CanvasRouteContext) {
       });
     }
 
-    if (getPrismaErrorCode(error) === "P2025") {
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { id: true },
+    });
+
+    if (!project || getPrismaErrorCode(error) === "P2025") {
       return apiError(404, "project_not_found", "Project not found.");
     }
 
@@ -169,7 +187,17 @@ export async function PUT(request: Request, context: CanvasRouteContext) {
     );
   }
 
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    select: { updatedAt: true },
+  });
+
+  if (!project) {
+    return apiError(404, "project_not_found", "Project not found.");
+  }
+
   return Response.json({
     canvasJSONPath: blob.url,
+    canvasUpdatedAt: project.updatedAt.toISOString(),
   } satisfies CanvasSaveResponse);
 }

@@ -93,7 +93,6 @@ import {
   NODE_SHAPES,
   type CanvasEdge,
   type CanvasNode,
-  type CanvasSnapshot,
   type NodeColor,
   type NodeShape,
   type NodeSize,
@@ -386,7 +385,7 @@ async function readLiveblocksAuthError(response: Response): Promise<string> {
 async function loadSavedCanvas(
   projectId: string,
   signal: AbortSignal,
-): Promise<CanvasSnapshot | null> {
+): Promise<CanvasSnapshotResponse> {
   const response = await fetch(`/api/projects/${projectId}/canvas`, {
     credentials: "include",
     method: "GET",
@@ -403,13 +402,17 @@ async function loadSavedCanvas(
     throw new Error("Saved canvas returned an invalid response.");
   }
 
-  return data.canvas;
+  return data;
 }
 
 function isCanvasSnapshotResponse(
   value: unknown,
 ): value is CanvasSnapshotResponse {
-  if (!isRecord(value) || !("canvas" in value)) {
+  if (
+    !isRecord(value) ||
+    !("canvas" in value) ||
+    typeof value.canvasUpdatedAt !== "string"
+  ) {
     return false;
   }
 
@@ -546,6 +549,7 @@ function CollaborativeFlowContent({
 }) {
   const [dragPreview, setDragPreview] =
     useState<ShapeDragPreviewState | null>(null);
+  const [canvasUpdatedAt, setCanvasUpdatedAt] = useState<string | null>(null);
   const [isCanvasLoadReady, setIsCanvasLoadReady] = useState(false);
   const canvasRef = useRef<HTMLDivElement>(null);
   const handledImportRequestIdRef = useRef<number | null>(null);
@@ -573,6 +577,7 @@ function CollaborativeFlowContent({
       edges: { initial: [] },
     });
   const { saveNow, status: saveStatus } = useCanvasAutosave({
+    canvasUpdatedAt,
     edges,
     enabled: isCanvasLoadReady && canSaveCanvas,
     nodes,
@@ -805,14 +810,15 @@ function CollaborativeFlowContent({
     const abortController = new AbortController();
 
     void loadSavedCanvas(roomId, abortController.signal)
-      .then((snapshot) => {
+      .then((response) => {
         if (abortController.signal.aborted) {
           return;
         }
 
         hasCheckedSavedCanvasRef.current = true;
+        setCanvasUpdatedAt(response.canvasUpdatedAt);
 
-        if (!snapshot) {
+        if (!response.canvas) {
           setIsCanvasLoadReady(true);
           return;
         }
@@ -825,18 +831,18 @@ function CollaborativeFlowContent({
           return;
         }
 
-        if (snapshot.nodes.length > 0) {
+        if (response.canvas.nodes.length > 0) {
           onNodesChange(
-            snapshot.nodes.map((node) => ({
+            response.canvas.nodes.map((node) => ({
               item: node,
               type: "add" as const,
             })),
           );
         }
 
-        if (snapshot.edges.length > 0) {
+        if (response.canvas.edges.length > 0) {
           onEdgesChange(
-            snapshot.edges.map((edge) => ({
+            response.canvas.edges.map((edge) => ({
               item: edge,
               type: "add" as const,
             })),
