@@ -1,4 +1,4 @@
-import { currentUser } from "@clerk/nextjs/server";
+import { auth, currentUser } from "@clerk/nextjs/server";
 
 import { prisma } from "@/lib/prisma";
 
@@ -15,24 +15,91 @@ export interface AccessibleProject {
   ownerId: string;
 }
 
-export async function getCurrentProjectIdentity(): Promise<ProjectIdentity | null> {
-  const user = await currentUser();
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
 
-  if (!user?.id) {
+function firstNonEmptyString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value !== "string") {
+      continue;
+    }
+
+    const trimmedValue = value.trim();
+
+    if (trimmedValue) {
+      return trimmedValue;
+    }
+  }
+
+  return null;
+}
+
+function combineName(firstName: unknown, lastName: unknown): string | null {
+  const nameParts = [firstName, lastName].filter(
+    (value): value is string => typeof value === "string" && value.trim().length > 0,
+  );
+
+  return firstNonEmptyString(nameParts.join(" "));
+}
+
+export async function getCurrentProjectIdentity(): Promise<ProjectIdentity | null> {
+  const authState = await auth();
+
+  if (!authState.userId) {
     return null;
   }
 
+  const sessionClaims: Record<string, unknown> = isRecord(authState.sessionClaims)
+    ? authState.sessionClaims
+    : {};
+  let primaryEmail = firstNonEmptyString(
+    sessionClaims.email,
+    sessionClaims.primary_email_address,
+    sessionClaims.primaryEmailAddress,
+    sessionClaims.email_address,
+  )?.toLowerCase() ?? null;
+  let displayName =
+    firstNonEmptyString(
+      sessionClaims.full_name,
+      sessionClaims.name,
+      combineName(sessionClaims.first_name, sessionClaims.last_name),
+      sessionClaims.username,
+      primaryEmail,
+    ) ?? "Project collaborator";
+  let avatarUrl = firstNonEmptyString(
+    sessionClaims.image_url,
+    sessionClaims.picture,
+    sessionClaims.avatar_url,
+  );
+
+  if (!primaryEmail || displayName === "Project collaborator" || !avatarUrl) {
+    try {
+      const user = await currentUser();
+
+      if (user?.id === authState.userId) {
+        primaryEmail ??= user.primaryEmailAddress?.emailAddress.trim().toLowerCase() ?? null;
+        displayName =
+          displayName === "Project collaborator"
+            ? (user.fullName ??
+              user.username ??
+              user.primaryEmailAddress?.emailAddress ??
+              displayName)
+            : displayName;
+        avatarUrl ??= user.imageUrl || null;
+      }
+    } catch (error) {
+      console.warn("Clerk currentUser fallback failed while resolving project identity.", error);
+    }
+  }
+
   return {
-    userId: user.id,
+    userId: authState.userId,
     // Normalize the primary email to a trimmed, lowercase form to match
     // collaborator email normalization used elsewhere.
-    primaryEmail: user.primaryEmailAddress?.emailAddress.trim().toLowerCase() ?? null,
-    displayName:
-      user.fullName ??
-      user.username ??
-      user.primaryEmailAddress?.emailAddress ??
-      "Project collaborator",
-    avatarUrl: user.imageUrl || null,
+    primaryEmail,
+    displayName,
+    avatarUrl,
   };
 }
 

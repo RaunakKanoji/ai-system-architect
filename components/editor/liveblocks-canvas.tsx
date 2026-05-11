@@ -16,6 +16,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -26,10 +27,16 @@ import {
   RoomProvider,
   useCanRedo,
   useCanUndo,
+  useOther,
+  useOthersMapped,
   useRedo,
   useUndo,
 } from "@liveblocks/react";
-import { Cursors, useLiveblocksFlow } from "@liveblocks/react-flow";
+import {
+  Cursors,
+  type CursorsCursorProps,
+  useLiveblocksFlow,
+} from "@liveblocks/react-flow";
 import {
   Background,
   BackgroundVariant,
@@ -49,7 +56,10 @@ import {
   Position,
   ReactFlow,
   ReactFlowProvider,
+  useEdges,
+  useNodes,
   useReactFlow,
+  useStoreApi,
 } from "@xyflow/react";
 import {
   Circle,
@@ -65,7 +75,15 @@ import {
   ZoomOut,
 } from "lucide-react";
 
+import {
+  type CanvasSaveStatus,
+  useCanvasAutosave,
+} from "@/hooks/use-canvas-autosave";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
+import {
+  type CanvasSnapshotResponse,
+  isCanvasSnapshot,
+} from "@/lib/canvas-snapshot";
 import { cn } from "@/lib/utils";
 import type { CanvasTemplate } from "@/components/editor/starter-templates";
 import {
@@ -75,6 +93,7 @@ import {
   NODE_SHAPES,
   type CanvasEdge,
   type CanvasNode,
+  type CanvasSnapshot,
   type NodeColor,
   type NodeShape,
   type NodeSize,
@@ -147,8 +166,10 @@ const handleStyle = {
   backgroundColor: "var(--text-primary)",
   border: "1.5px solid var(--bg-base)",
   height: 8,
+  pointerEvents: "auto",
   width: 8,
-};
+  zIndex: 20,
+} satisfies CSSProperties;
 const nodeResizerHandleStyle = {
   backgroundColor: "var(--accent-primary)",
   border: "1px solid var(--bg-base)",
@@ -178,12 +199,24 @@ interface MiniMapNodeShapeProps {
   onClick?: (event: ReactMouseEvent, id: string) => void;
 }
 
+interface ParticipantSummary {
+  avatarUrl: string | null;
+  connectionId: number;
+  cursorColor: string;
+  displayName: string;
+  userId: string;
+}
+
 interface LiveblocksCanvasProps {
+  isAiSidebarOpen: boolean;
+  onManualSaveReady: (saveNow: (() => Promise<void>) | null) => void;
+  onSaveStatusChange: (status: CanvasSaveStatus) => void;
   roomId: string;
 }
 
 export interface LiveblocksCanvasHandle {
   importTemplate: (template: CanvasTemplate) => void;
+  saveNow: () => Promise<void>;
 }
 
 interface TemplateImportRequest {
@@ -211,10 +244,21 @@ interface CanvasErrorBoundaryState {
 export const LiveblocksCanvas = forwardRef<
   LiveblocksCanvasHandle,
   LiveblocksCanvasProps
->(function LiveblocksCanvas({ roomId }, ref) {
-  const { isLoaded, isSignedIn } = useAuth();
+>(function LiveblocksCanvas(
+  { isAiSidebarOpen, onManualSaveReady, onSaveStatusChange, roomId },
+  ref,
+) {
+  const { isLoaded, isSignedIn, userId } = useAuth();
   const [templateImportRequest, setTemplateImportRequest] =
     useState<TemplateImportRequest | null>(null);
+  const manualSaveRef = useRef<(() => Promise<void>) | null>(null);
+  const handleManualSaveReady = useCallback(
+    (saveNow: (() => Promise<void>) | null) => {
+      manualSaveRef.current = saveNow;
+      onManualSaveReady(saveNow);
+    },
+    [onManualSaveReady],
+  );
   const authenticateLiveblocks = useCallback(
     async (room?: string): Promise<LiveblocksAuthResult> => {
       if (!room) {
@@ -268,6 +312,9 @@ export const LiveblocksCanvas = forwardRef<
           template,
         });
       },
+      saveNow() {
+        return manualSaveRef.current?.() ?? Promise.resolve();
+      },
     }),
     [],
   );
@@ -285,16 +332,27 @@ export const LiveblocksCanvas = forwardRef<
     );
   }
 
+  if (!userId) {
+    return <CanvasLoadingState />;
+  }
+
   return (
     <CanvasErrorBoundary>
       <LiveblocksProvider authEndpoint={authenticateLiveblocks}>
         <RoomProvider
           id={roomId}
-          initialPresence={{ cursor: null, isThinking: false }}
+          initialPresence={{ cursor: null, thinking: false }}
         >
           <ClientSideSuspense fallback={<CanvasLoadingState />}>
             {() => (
-              <CollaborativeFlow importRequest={templateImportRequest} />
+              <CollaborativeFlow
+                currentUserId={userId}
+                importRequest={templateImportRequest}
+                isAiSidebarOpen={isAiSidebarOpen}
+                onManualSaveReady={handleManualSaveReady}
+                onSaveStatusChange={onSaveStatusChange}
+                roomId={roomId}
+              />
             )}
           </ClientSideSuspense>
         </RoomProvider>
@@ -323,6 +381,39 @@ async function readLiveblocksAuthError(response: Response): Promise<string> {
   return fallback;
 }
 
+async function loadSavedCanvas(
+  projectId: string,
+  signal: AbortSignal,
+): Promise<CanvasSnapshot | null> {
+  const response = await fetch(`/api/projects/${projectId}/canvas`, {
+    credentials: "include",
+    method: "GET",
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error("Saved canvas could not be loaded.");
+  }
+
+  const data: unknown = await response.json();
+
+  if (!isCanvasSnapshotResponse(data)) {
+    throw new Error("Saved canvas returned an invalid response.");
+  }
+
+  return data.canvas;
+}
+
+function isCanvasSnapshotResponse(
+  value: unknown,
+): value is CanvasSnapshotResponse {
+  if (!isRecord(value) || !("canvas" in value)) {
+    return false;
+  }
+
+  return value.canvas === null || isCanvasSnapshot(value.canvas);
+}
+
 function isLiveblocksTokenResponse(
   value: unknown,
 ): value is { token: string } {
@@ -331,6 +422,41 @@ function isLiveblocksTokenResponse(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isString(value: string | null): value is string {
+  return typeof value === "string";
+}
+
+function isEditableKeyboardTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  if (
+    target.isContentEditable ||
+    target.closest("[contenteditable='true'], [contenteditable='']")
+  ) {
+    return true;
+  }
+
+  return ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
+}
+
+function shouldPreserveFocusedTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  if (target.closest("[data-canvas-select-target='true']")) {
+    return false;
+  }
+
+  return Boolean(
+    target.closest(
+      "a, button, input, select, textarea, [contenteditable='true'], [contenteditable=''], [role='button']",
+    ),
+  );
 }
 
 class CanvasErrorBoundary extends Component<
@@ -364,27 +490,66 @@ class CanvasErrorBoundary extends Component<
 }
 
 function CollaborativeFlow({
+  currentUserId,
   importRequest,
+  isAiSidebarOpen,
+  onManualSaveReady,
+  onSaveStatusChange,
+  roomId,
 }: {
+  currentUserId: string;
   importRequest: TemplateImportRequest | null;
+  isAiSidebarOpen: boolean;
+  onManualSaveReady: (saveNow: (() => Promise<void>) | null) => void;
+  onSaveStatusChange: (status: CanvasSaveStatus) => void;
+  roomId: string;
 }) {
   return (
     <ReactFlowProvider>
-      <CollaborativeFlowContent importRequest={importRequest} />
+      <CollaborativeFlowContent
+        currentUserId={currentUserId}
+        importRequest={importRequest}
+        isAiSidebarOpen={isAiSidebarOpen}
+        onManualSaveReady={onManualSaveReady}
+        onSaveStatusChange={onSaveStatusChange}
+        roomId={roomId}
+      />
     </ReactFlowProvider>
   );
 }
 
 function CollaborativeFlowContent({
+  currentUserId,
   importRequest,
+  isAiSidebarOpen,
+  onManualSaveReady,
+  onSaveStatusChange,
+  roomId,
 }: {
+  currentUserId: string;
   importRequest: TemplateImportRequest | null;
+  isAiSidebarOpen: boolean;
+  onManualSaveReady: (saveNow: (() => Promise<void>) | null) => void;
+  onSaveStatusChange: (status: CanvasSaveStatus) => void;
+  roomId: string;
 }) {
   const [dragPreview, setDragPreview] =
     useState<ShapeDragPreviewState | null>(null);
+  const [isCanvasLoadReady, setIsCanvasLoadReady] = useState(false);
   const canvasRef = useRef<HTMLDivElement>(null);
   const handledImportRequestIdRef = useRef<number | null>(null);
+  const hasCheckedSavedCanvasRef = useRef(false);
+  const isCheckingSavedCanvasRef = useRef(false);
+  const isCanvasKeyboardActiveRef = useRef(false);
+  const activeCanvasSelectionRef = useRef<{
+    edgeId: string | null;
+    nodeId: string | null;
+  }>({ edgeId: null, nodeId: null });
+  const latestEdgesRef = useRef<CanvasEdge[]>([]);
+  const latestNodesRef = useRef<CanvasNode[]>([]);
   const reactFlow = useReactFlow<CanvasNode, CanvasEdge>();
+  const selectedNodes = useNodes<CanvasNode>().filter((node) => node.selected);
+  const selectedEdges = useEdges<CanvasEdge>().filter((edge) => edge.selected);
   const { screenToFlowPosition } = reactFlow;
   const undo = useUndo();
   const redo = useRedo();
@@ -396,6 +561,12 @@ function CollaborativeFlowContent({
       nodes: { initial: [] },
       edges: { initial: [] },
     });
+  const { saveNow, status: saveStatus } = useCanvasAutosave({
+    edges,
+    enabled: isCanvasLoadReady,
+    nodes,
+    projectId: roomId,
+  });
   const handleUndo = useCallback(() => {
     if (canUndo) {
       undo();
@@ -418,6 +589,53 @@ function CollaborativeFlowContent({
       padding: 0.18,
     });
   }, [reactFlow]);
+  const deleteSelectedCanvasElements = useCallback(() => {
+    const currentNodes = reactFlow.getNodes();
+    const currentEdges = reactFlow.getEdges();
+    const selectedNodeIds = new Set<string>(
+      [
+        activeCanvasSelectionRef.current.nodeId,
+        ...selectedNodes.map((node) => node.id),
+        ...currentNodes.filter((node) => node.selected).map((node) => node.id),
+      ].filter(isString),
+    );
+    const edgeIdsToRemove = new Set<string>(
+      [
+        activeCanvasSelectionRef.current.edgeId,
+        ...selectedEdges.map((edge) => edge.id),
+        ...currentEdges.filter((edge) => edge.selected).map((edge) => edge.id),
+      ].filter(isString),
+    );
+
+    for (const edge of currentEdges) {
+      if (selectedNodeIds.has(edge.source) || selectedNodeIds.has(edge.target)) {
+        edgeIdsToRemove.add(edge.id);
+      }
+    }
+
+    if (selectedNodeIds.size === 0 && edgeIdsToRemove.size === 0) {
+      return false;
+    }
+
+    const nodesToRemove = currentNodes.filter((node) =>
+      selectedNodeIds.has(node.id),
+    );
+    const edgesToRemove = currentEdges.filter((edge) =>
+      edgeIdsToRemove.has(edge.id),
+    );
+
+    if (nodesToRemove.length === 0 && edgesToRemove.length === 0) {
+      return false;
+    }
+
+    onDelete({
+      edges: edgesToRemove,
+      nodes: nodesToRemove,
+    });
+    activeCanvasSelectionRef.current = { edgeId: null, nodeId: null };
+
+    return true;
+  }, [onDelete, reactFlow, selectedEdges, selectedNodes]);
   const importTemplate = useCallback(
     (template: CanvasTemplate) => {
       const removedEdgeChanges = edges.map((edge) => ({
@@ -468,6 +686,182 @@ function CollaborativeFlowContent({
     redo: handleRedo,
     undo: handleUndo,
   });
+
+  useEffect(() => {
+    latestEdgesRef.current = edges;
+    latestNodesRef.current = nodes;
+  }, [edges, nodes]);
+
+  useEffect(() => {
+    const wrapper = canvasRef.current;
+
+    if (!wrapper) {
+      return;
+    }
+
+    const canvasWrapper = wrapper;
+
+    function handleDeleteKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key !== "Delete" && event.key !== "Backspace") {
+        return false;
+      }
+
+      if (isEditableKeyboardTarget(event.target)) {
+        return false;
+      }
+
+      if (!deleteSelectedCanvasElements()) {
+        return false;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      return true;
+    }
+
+    function handleCanvasKeyDown(event: globalThis.KeyboardEvent) {
+      handleDeleteKeyDown(event);
+    }
+
+    function handleDocumentKeyDown(event: globalThis.KeyboardEvent) {
+      if (canvasWrapper.contains(event.target as Node | null)) {
+        return;
+      }
+
+      if (!isCanvasKeyboardActiveRef.current) {
+        return;
+      }
+
+      handleDeleteKeyDown(event);
+    }
+
+    function handleDocumentPointerDown(event: globalThis.PointerEvent) {
+      if (!canvasWrapper.contains(event.target as Node | null)) {
+        isCanvasKeyboardActiveRef.current = false;
+      }
+    }
+
+    canvasWrapper.addEventListener("keydown", handleCanvasKeyDown, true);
+    document.addEventListener("keydown", handleDocumentKeyDown, true);
+    document.addEventListener("pointerdown", handleDocumentPointerDown, true);
+
+    return () => {
+      canvasWrapper.removeEventListener("keydown", handleCanvasKeyDown, true);
+      document.removeEventListener("keydown", handleDocumentKeyDown, true);
+      document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
+    };
+  }, [deleteSelectedCanvasElements]);
+
+  useEffect(() => {
+    onSaveStatusChange(saveStatus);
+  }, [onSaveStatusChange, saveStatus]);
+
+  useEffect(() => {
+    onManualSaveReady(isCanvasLoadReady ? saveNow : null);
+
+    return () => {
+      onManualSaveReady(null);
+    };
+  }, [isCanvasLoadReady, onManualSaveReady, saveNow]);
+
+  useEffect(() => {
+    if (
+      isCanvasLoadReady ||
+      hasCheckedSavedCanvasRef.current ||
+      isCheckingSavedCanvasRef.current
+    ) {
+      return;
+    }
+
+    if (nodes.length > 0 || edges.length > 0) {
+      const timeoutId = window.setTimeout(() => {
+        hasCheckedSavedCanvasRef.current = true;
+        setIsCanvasLoadReady(true);
+      }, 0);
+
+      return () => {
+        window.clearTimeout(timeoutId);
+      };
+    }
+
+    isCheckingSavedCanvasRef.current = true;
+    const abortController = new AbortController();
+
+    void loadSavedCanvas(roomId, abortController.signal)
+      .then((snapshot) => {
+        if (abortController.signal.aborted) {
+          return;
+        }
+
+        hasCheckedSavedCanvasRef.current = true;
+
+        if (!snapshot) {
+          setIsCanvasLoadReady(true);
+          return;
+        }
+
+        if (
+          latestNodesRef.current.length > 0 ||
+          latestEdgesRef.current.length > 0
+        ) {
+          setIsCanvasLoadReady(true);
+          return;
+        }
+
+        if (snapshot.nodes.length > 0) {
+          onNodesChange(
+            snapshot.nodes.map((node) => ({
+              item: node,
+              type: "add" as const,
+            })),
+          );
+        }
+
+        if (snapshot.edges.length > 0) {
+          onEdgesChange(
+            snapshot.edges.map((edge) => ({
+              item: edge,
+              type: "add" as const,
+            })),
+          );
+        }
+
+        window.requestAnimationFrame(() => {
+          void reactFlow.fitView({
+            duration: VIEWPORT_ANIMATION_DURATION,
+            padding: 0.18,
+          });
+        });
+        setIsCanvasLoadReady(true);
+      })
+      .catch((error: unknown) => {
+        if (abortController.signal.aborted) {
+          return;
+        }
+
+        hasCheckedSavedCanvasRef.current = true;
+        console.error("Saved canvas load failed", error);
+        onSaveStatusChange("error");
+        setIsCanvasLoadReady(true);
+      })
+      .finally(() => {
+        isCheckingSavedCanvasRef.current = false;
+      });
+
+    return () => {
+      abortController.abort();
+      isCheckingSavedCanvasRef.current = false;
+    };
+  }, [
+    edges.length,
+    isCanvasLoadReady,
+    nodes.length,
+    onEdgesChange,
+    onNodesChange,
+    onSaveStatusChange,
+    reactFlow,
+    roomId,
+  ]);
 
   useEffect(() => {
     if (!importRequest) {
@@ -541,6 +935,22 @@ function CollaborativeFlowContent({
     }
 
     onEdgesChange([{ type: "replace", id: oldEdge.id, item: edge }]);
+  }
+
+  function handleNodeClick(_event: ReactMouseEvent, node: CanvasNode) {
+    activeCanvasSelectionRef.current = { edgeId: null, nodeId: node.id };
+    isCanvasKeyboardActiveRef.current = true;
+    canvasRef.current?.focus({ preventScroll: true });
+  }
+
+  function handleEdgeClick(_event: ReactMouseEvent, edge: CanvasEdge) {
+    activeCanvasSelectionRef.current = { edgeId: edge.id, nodeId: null };
+    isCanvasKeyboardActiveRef.current = true;
+    canvasRef.current?.focus({ preventScroll: true });
+  }
+
+  function handlePaneClick() {
+    activeCanvasSelectionRef.current = { edgeId: null, nodeId: null };
   }
 
   function addShapeNode(
@@ -635,12 +1045,26 @@ function CollaborativeFlowContent({
     });
   }
 
+  function handleCanvasPointerDownCapture(
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) {
+    if (shouldPreserveFocusedTarget(event.target)) {
+      isCanvasKeyboardActiveRef.current = false;
+      return;
+    }
+
+    isCanvasKeyboardActiveRef.current = true;
+    event.currentTarget.focus({ preventScroll: true });
+  }
+
   return (
     <div
       ref={canvasRef}
-      className="h-full w-full bg-base"
+      tabIndex={0}
+      className="h-full w-full bg-base outline-none focus:outline-none focus-visible:outline-none"
       onDragOver={handleDragOver}
       onDrop={handleDrop}
+      onPointerDownCapture={handleCanvasPointerDownCapture}
     >
       <ReactFlow
         className="h-full w-full bg-base"
@@ -649,18 +1073,21 @@ function CollaborativeFlowContent({
         connectionLineType={ConnectionLineType.SmoothStep}
         connectionRadius={32}
         defaultEdgeOptions={DEFAULT_EDGE_OPTIONS}
+        deleteKeyCode={null}
         edges={edges}
         edgeTypes={edgeTypes}
         edgesReconnectable
-        fitView
         nodes={nodes}
         nodeTypes={nodeTypes}
         onConnect={handleConnect}
         onDelete={onDelete}
         onDragOver={handleDragOver}
         onDrop={handleDrop}
+        onEdgeClick={handleEdgeClick}
         onEdgesChange={onEdgesChange}
+        onNodeClick={handleNodeClick}
         onNodesChange={onNodesChange}
+        onPaneClick={handlePaneClick}
         onReconnect={handleReconnect}
         reconnectRadius={18}
       >
@@ -686,7 +1113,11 @@ function CollaborativeFlowContent({
           }}
           zoomable
         />
-        <Cursors />
+        <LiveCursorLayer currentUserId={currentUserId} />
+        <ParticipantAvatarGroup
+          currentUserId={currentUserId}
+          isAiSidebarOpen={isAiSidebarOpen}
+        />
         <CanvasControlBar
           canRedo={canRedo}
           canUndo={canUndo}
@@ -791,6 +1222,196 @@ function CanvasControlButton({
       {children}
     </button>
   );
+}
+
+function ParticipantAvatarGroup({
+  currentUserId,
+  isAiSidebarOpen,
+}: {
+  currentUserId: string;
+  isAiSidebarOpen: boolean;
+}) {
+  const participantEntries = useOthersMapped(
+    (other): ParticipantSummary => ({
+      avatarUrl: other.info.avatarUrl ?? null,
+      connectionId: other.connectionId,
+      cursorColor: other.info.cursorColor || "var(--accent-primary)",
+      displayName: other.info.displayName || `Collaborator ${other.connectionId}`,
+      userId: other.id,
+    }),
+    areParticipantSummariesEqual,
+  );
+  const collaborators = participantEntries
+    .map(([connectionId, participant]) => ({
+      ...participant,
+      connectionId,
+    }))
+    .filter((participant) => participant.userId !== currentUserId);
+  const visibleCollaborators = collaborators.slice(0, 5);
+  const overflowCount = Math.max(collaborators.length - visibleCollaborators.length, 0);
+
+  if (collaborators.length === 0) {
+    return null;
+  }
+
+  return (
+    <div
+      aria-label="Canvas participants"
+      className={cn(
+        "nodrag nopan absolute right-4 top-4 z-40 flex items-center rounded-full border border-surface-border bg-surface/95 px-1.5 py-1.5 shadow-2xl backdrop-blur",
+        isAiSidebarOpen && "lg:right-[calc(22rem+2rem)]",
+      )}
+    >
+      <div className="flex items-center px-1">
+        {visibleCollaborators.map((participant, index) => (
+          <CollaboratorAvatar
+            key={participant.connectionId}
+            participant={participant}
+            stackIndex={index}
+          />
+        ))}
+        {overflowCount > 0 ? (
+          <div
+            aria-label={`${overflowCount} more collaborators`}
+            className="-ml-2 grid h-9 min-w-9 place-items-center rounded-full border border-surface-border bg-subtle px-2 text-xs font-medium text-copy-secondary ring-2 ring-base"
+          >
+            +{overflowCount}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function CollaboratorAvatar({
+  participant,
+  stackIndex,
+}: {
+  participant: ParticipantSummary;
+  stackIndex: number;
+}) {
+  const initials = getInitials(participant.displayName);
+
+  return (
+    <div
+      aria-label={participant.displayName}
+      className={cn(
+        "grid h-9 w-9 place-items-center rounded-full border border-surface-border bg-subtle text-xs font-semibold text-copy-primary ring-2 ring-base",
+        stackIndex > 0 && "-ml-2",
+      )}
+      style={
+        participant.avatarUrl
+          ? {
+              backgroundImage: `url(${participant.avatarUrl})`,
+              backgroundPosition: "center",
+              backgroundSize: "cover",
+            }
+          : undefined
+      }
+      title={participant.displayName}
+    >
+      {participant.avatarUrl ? (
+        <span className="sr-only">{participant.displayName}</span>
+      ) : (
+        initials
+      )}
+    </div>
+  );
+}
+
+function LiveCursorLayer({
+  currentUserId,
+}: {
+  currentUserId: string;
+}) {
+  const components = useMemo(
+    () => ({
+      Cursor(cursorProps: CursorsCursorProps) {
+        return (
+          <LiveCursor currentUserId={currentUserId} cursorProps={cursorProps} />
+        );
+      },
+    }),
+    [currentUserId],
+  );
+
+  return (
+    <Cursors
+      className="pointer-events-none absolute inset-0 z-30 overflow-hidden"
+      components={components}
+    />
+  );
+}
+
+function LiveCursor({
+  currentUserId,
+  cursorProps,
+}: {
+  currentUserId: string;
+  cursorProps: CursorsCursorProps;
+}) {
+  const participant = useOther(cursorProps.connectionId, (other): ParticipantSummary => ({
+    avatarUrl: other.info.avatarUrl ?? null,
+    connectionId: other.connectionId,
+    cursorColor: other.info.cursorColor || "var(--accent-primary)",
+    displayName: other.info.displayName || `Collaborator ${other.connectionId}`,
+    userId: other.id,
+  }));
+
+  if (!participant || participant.userId === currentUserId) {
+    return null;
+  }
+
+  return (
+    <div className="flex items-start">
+      <svg
+        aria-hidden="true"
+        className="drop-shadow-lg"
+        fill="none"
+        height="18"
+        viewBox="0 0 18 18"
+        width="18"
+      >
+        <path
+          d="M2 2L15 7.2L9.3 9.3L7.2 15Z"
+          fill={participant.cursorColor}
+          stroke="var(--bg-base)"
+          strokeLinejoin="round"
+          strokeWidth="1.5"
+        />
+      </svg>
+      <div
+        className="ml-1 mt-3 max-w-36 truncate rounded-full px-2 py-1 text-xs font-medium text-background shadow-xl"
+        style={{ backgroundColor: participant.cursorColor }}
+      >
+        {participant.displayName}
+      </div>
+    </div>
+  );
+}
+
+function areParticipantSummariesEqual(
+  previous: ParticipantSummary,
+  current: ParticipantSummary,
+) {
+  return (
+    previous.avatarUrl === current.avatarUrl &&
+    previous.connectionId === current.connectionId &&
+    previous.cursorColor === current.cursorColor &&
+    previous.displayName === current.displayName &&
+    previous.userId === current.userId
+  );
+}
+
+function getInitials(name: string) {
+  const initials = name
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("");
+
+  return initials || "?";
 }
 
 function ShapePanel({
@@ -1105,36 +1726,65 @@ function NodeShapeFrame({
   strokeColor: string;
   textColor: string;
 }) {
+  const labelInputRef = useRef<HTMLTextAreaElement | null>(null);
   const visibleLabel = label.trim() ? label : "label";
+
+  useEffect(() => {
+    if (!isEditing) {
+      return;
+    }
+
+    const input = labelInputRef.current;
+
+    if (!input) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      input.focus({ preventScroll: true });
+      input.setSelectionRange(input.value.length, input.value.length);
+    });
+  }, [isEditing]);
 
   function handleLabelChange(event: ChangeEvent<HTMLTextAreaElement>) {
     onLabelChange?.(event.target.value);
   }
 
-  function handleLabelKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    event.stopPropagation();
+	  function handleLabelKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+	    event.stopPropagation();
 
     if (event.key !== "Escape") {
       return;
     }
 
     event.preventDefault();
-    event.currentTarget.blur();
+	    event.currentTarget.blur();
+	  }
+
+  function handleFrameDoubleClick(event: ReactMouseEvent<HTMLDivElement>) {
+    event.stopPropagation();
+    onEditStart?.();
   }
 
-  return (
-    <div
-      className={cn(
-        "group relative h-full w-full text-sm font-medium",
-        selected && "drop-shadow-[0_0_16px_var(--accent-primary-dim)]",
-      )}
-      style={{ color: textColor }}
-    >
+  function handleLabelClick(event: ReactMouseEvent<HTMLButtonElement>) {
+    event.stopPropagation();
+    onEditStart?.();
+  }
+
+	  return (
+	    <div
+	      className={cn(
+	        "group relative h-full w-full text-sm font-medium",
+	        selected && "drop-shadow-[0_0_16px_var(--accent-primary-dim)]",
+	      )}
+	      style={{ color: textColor }}
+      onDoubleClick={handleFrameDoubleClick}
+	    >
       <NodeShapeSurface color={color} shape={shape} strokeColor={strokeColor} />
       {isEditing ? (
         <textarea
+          ref={labelInputRef}
           aria-label="Node label"
-          autoFocus
           className="nodrag nopan nowheel absolute inset-x-3 top-1/2 z-10 max-h-[calc(100%-1rem)] min-h-5 -translate-y-1/2 resize-none overflow-hidden border-0 bg-transparent px-1 text-center text-sm font-medium leading-5 outline-none [field-sizing:content]"
           rows={1}
           spellCheck={false}
@@ -1142,6 +1792,7 @@ function NodeShapeFrame({
           onBlur={onEditEnd}
           onChange={handleLabelChange}
           onDoubleClick={(event) => event.stopPropagation()}
+          onKeyDownCapture={(event) => event.stopPropagation()}
           onKeyDown={handleLabelKeyDown}
           onMouseDown={(event) => event.stopPropagation()}
           onPointerDown={(event) => event.stopPropagation()}
@@ -1150,15 +1801,11 @@ function NodeShapeFrame({
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-4 text-center">
           <button
             aria-label="Edit node label"
-            className="nodrag nopan pointer-events-auto min-w-0 cursor-text focus-visible:outline-none"
-            type="button"
-            onDoubleClick={(event) => {
-              event.stopPropagation();
-              onEditStart?.();
-            }}
-            onMouseDown={(event) => event.stopPropagation()}
-            onPointerDown={(event) => event.stopPropagation()}
-          >
+	            className="nodrag nopan pointer-events-auto min-w-0 cursor-text focus-visible:outline-none"
+	            type="button"
+            onClick={handleLabelClick}
+            onDoubleClick={(event) => event.stopPropagation()}
+	          >
             <span
               className={cn(
                 "block min-w-0 truncate",
@@ -1303,7 +1950,8 @@ function CanvasEdgeRenderer({
   const [isEditing, setIsEditing] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
   const [draftLabel, setDraftLabel] = useState(data?.label ?? "");
-  const { updateEdgeData } = useReactFlow<CanvasNode, CanvasEdge>();
+  const reactFlow = useReactFlow<CanvasNode, CanvasEdge>();
+  const store = useStoreApi<CanvasNode, CanvasEdge>();
   const [edgePath, labelX, labelY] = getSmoothStepPath({
     sourceX,
     sourceY,
@@ -1316,6 +1964,7 @@ function CanvasEdgeRenderer({
   });
   const label = data?.label ?? "";
   const isActive = selected || isHovered || isEditing;
+  const shouldShowEmptyLabel = selected || isEditing;
   const visibleLabel = label.trim();
 
   function startEditing() {
@@ -1324,14 +1973,40 @@ function CanvasEdgeRenderer({
   }
 
   function saveLabel() {
-    updateEdgeData(id, { label: draftLabel });
+    const edge = reactFlow.getEdge(id);
+
+    if (!edge) {
+      setIsEditing(false);
+      return;
+    }
+
+    store.getState().triggerEdgeChanges([
+      {
+        id,
+        item: {
+          ...edge,
+          data: {
+            ...(edge.data ?? {}),
+            label: draftLabel,
+          },
+        },
+        type: "replace",
+      },
+    ]);
     setIsEditing(false);
   }
 
   function handleLabelKeyDown(event: KeyboardEvent<HTMLInputElement>) {
     event.stopPropagation();
 
-    if (event.key !== "Enter" && event.key !== "Escape") {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setDraftLabel(label);
+      setIsEditing(false);
+      return;
+    }
+
+    if (event.key !== "Enter") {
       return;
     }
 
@@ -1343,6 +2018,11 @@ function CanvasEdgeRenderer({
     event: ReactMouseEvent<HTMLElement> | KeyboardEvent<HTMLInputElement>,
   ) {
     event.stopPropagation();
+  }
+
+  function handleLabelEditClick(event: ReactMouseEvent<HTMLButtonElement>) {
+    event.stopPropagation();
+    startEditing();
   }
 
   return (
@@ -1399,30 +2079,26 @@ function CanvasEdgeRenderer({
               onMouseDown={stopCanvasInteraction}
               onPointerDown={(event) => event.stopPropagation()}
             />
-          ) : visibleLabel ? (
-            <button
-              className="rounded-full border border-surface-border bg-surface/95 px-2.5 py-1 text-xs font-medium text-copy-secondary shadow-lg backdrop-blur transition hover:border-brand hover:text-copy-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-              type="button"
-              onDoubleClick={(event) => {
-                event.stopPropagation();
-                startEditing();
-              }}
-              onMouseDown={stopCanvasInteraction}
-              onPointerDown={(event) => event.stopPropagation()}
-            >
-              {visibleLabel}
-            </button>
-          ) : isActive ? (
-            <button
-              className="rounded-full border border-surface-border bg-surface/80 px-2.5 py-1 text-xs font-medium text-copy-faint shadow-lg backdrop-blur transition hover:border-brand hover:text-copy-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-              type="button"
-              onDoubleClick={(event) => {
-                event.stopPropagation();
-                startEditing();
-              }}
-              onMouseDown={stopCanvasInteraction}
-              onPointerDown={(event) => event.stopPropagation()}
-            >
+	          ) : visibleLabel ? (
+	            <button
+	              className="rounded-full border border-surface-border bg-surface/95 px-2.5 py-1 text-xs font-medium text-copy-secondary shadow-lg backdrop-blur transition hover:border-brand hover:text-copy-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+	              type="button"
+	              onClick={handleLabelEditClick}
+	              onDoubleClick={stopCanvasInteraction}
+	              onMouseDown={stopCanvasInteraction}
+	              onPointerDown={(event) => event.stopPropagation()}
+	            >
+	              {visibleLabel}
+	            </button>
+	          ) : shouldShowEmptyLabel ? (
+	            <button
+	              className="rounded-full border border-surface-border bg-surface/80 px-2.5 py-1 text-xs font-medium text-copy-faint shadow-lg backdrop-blur transition hover:border-brand hover:text-copy-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+	              type="button"
+	              onClick={handleLabelEditClick}
+	              onDoubleClick={stopCanvasInteraction}
+	              onMouseDown={stopCanvasInteraction}
+	              onPointerDown={(event) => event.stopPropagation()}
+	            >
               label
             </button>
           ) : null}

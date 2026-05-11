@@ -1,17 +1,19 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   Bot,
   LayoutTemplate,
+  LoaderCircle,
   PanelLeftClose,
   PanelLeftOpen,
+  Save,
   Share2,
 } from "lucide-react";
 import Link from "next/link";
-import { UserButton } from "@clerk/nextjs";
 
+import { AiSidebar } from "@/components/editor/ai-sidebar";
 import {
   LiveblocksCanvas,
   type LiveblocksCanvasHandle,
@@ -25,6 +27,7 @@ import {
 } from "@/components/editor/starter-templates";
 import { StarterTemplatesModal } from "@/components/editor/starter-templates-modal";
 import { Button, buttonVariants } from "@/components/ui/button";
+import type { CanvasSaveStatus } from "@/hooks/use-canvas-autosave";
 import { useProjectActions } from "@/hooks/use-project-actions";
 import type { EditorProject } from "@/lib/project-data";
 import { cn } from "@/lib/utils";
@@ -48,12 +51,52 @@ export function EditorWorkspaceClient({
   const [isAiSidebarOpen, setIsAiSidebarOpen] = useState(true);
   const [isShareDialogOpen, setIsShareDialogOpen] = useState(false);
   const [isTemplatesModalOpen, setIsTemplatesModalOpen] = useState(false);
+  const [canvasSaveStatus, setCanvasSaveStatus] = useState<CanvasSaveStatus | "idle">(
+    "idle",
+  );
+  const [manualSave, setManualSave] = useState<(() => Promise<void>) | null>(
+    null,
+  );
   const canvasRef = useRef<LiveblocksCanvasHandle>(null);
   const projectActions = useProjectActions();
   const SidebarIcon = isSidebarOpen ? PanelLeftClose : PanelLeftOpen;
+  const handleSaveStatusChange = useCallback((status: CanvasSaveStatus) => {
+    setCanvasSaveStatus(status);
+  }, []);
+  const handleManualSaveReady = useCallback(
+    (saveNow: (() => Promise<void>) | null) => {
+      setManualSave(() => saveNow);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (canvasSaveStatus !== "saved" && canvasSaveStatus !== "error") {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setCanvasSaveStatus("idle");
+    }, 1200);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [canvasSaveStatus]);
 
   function handleTemplateImport(template: CanvasTemplate) {
     canvasRef.current?.importTemplate(template);
+  }
+
+  function handleSaveClick() {
+    if (!manualSave) {
+      return;
+    }
+
+    setCanvasSaveStatus("saving");
+    void manualSave().catch(() => {
+      setCanvasSaveStatus("error");
+    });
   }
 
   return (
@@ -87,6 +130,25 @@ export function EditorWorkspaceClient({
 
         <div className="flex items-center justify-end gap-2">
           <Button
+            aria-label={`Canvas ${canvasSaveStatus}`}
+            className={cn(
+              "min-w-24",
+              canvasSaveStatus === "saved" && "text-state-success",
+              canvasSaveStatus === "error" && "text-state-error",
+            )}
+            disabled={!manualSave || canvasSaveStatus === "saving"}
+            type="button"
+            variant="outline"
+            onClick={handleSaveClick}
+          >
+            {canvasSaveStatus === "saving" ? (
+              <LoaderCircle className="h-4 w-4 animate-spin" />
+            ) : (
+              <Save className="h-4 w-4" />
+            )}
+            {getSaveStatusLabel(canvasSaveStatus)}
+          </Button>
+          <Button
             type="button"
             variant="outline"
             onClick={() => setIsTemplatesModalOpen(true)}
@@ -115,7 +177,6 @@ export function EditorWorkspaceClient({
             <Bot className="h-4 w-4" />
             AI
           </Button>
-          <UserButton />
         </div>
       </header>
 
@@ -132,24 +193,19 @@ export function EditorWorkspaceClient({
 
       <div className="relative min-h-0 flex-1 overflow-hidden bg-base">
         <section className="absolute inset-0 bg-base">
-          <LiveblocksCanvas ref={canvasRef} roomId={roomId} />
+          <LiveblocksCanvas
+            ref={canvasRef}
+            isAiSidebarOpen={isAiSidebarOpen}
+            onManualSaveReady={handleManualSaveReady}
+            onSaveStatusChange={handleSaveStatusChange}
+            roomId={roomId}
+          />
         </section>
 
-        {isAiSidebarOpen ? (
-          <aside className="absolute bottom-4 right-4 top-4 z-30 hidden w-[min(22rem,calc(100vw-2rem))] flex-col rounded-2xl border border-surface-border bg-surface/95 p-4 shadow-2xl backdrop-blur lg:flex">
-            <div className="flex items-center gap-2 border-b border-surface-border pb-4">
-              <Bot className="h-4 w-4 text-brand" />
-              <h2 className="text-sm font-medium text-copy-primary">
-                AI Assistant
-              </h2>
-            </div>
-            <div className="flex flex-1 items-center justify-center px-4 text-center">
-              <p className="text-sm leading-6 text-copy-muted">
-                AI chat will be wired into this panel later.
-              </p>
-            </div>
-          </aside>
-        ) : null}
+        <AiSidebar
+          isOpen={isAiSidebarOpen}
+          onClose={() => setIsAiSidebarOpen(false)}
+        />
       </div>
 
       <ProjectDialogs dialogs={projectActions} />
@@ -168,4 +224,20 @@ export function EditorWorkspaceClient({
       />
     </main>
   );
+}
+
+function getSaveStatusLabel(status: CanvasSaveStatus | "idle") {
+  if (status === "saving") {
+    return "Saving...";
+  }
+
+  if (status === "error") {
+    return "Error";
+  }
+
+  if (status === "saved") {
+    return "Saved";
+  }
+
+  return "Save";
 }
