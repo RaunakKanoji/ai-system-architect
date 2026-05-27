@@ -1,3 +1,5 @@
+"use client";
+
 import { Plus, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -21,6 +23,7 @@ export function ProjectSidebar({ isOpen, onClose }: ProjectSidebarProps) {
   return (
     <aside
       aria-hidden={!isOpen}
+      {...(!isOpen ? { inert: '' } : {})}
       className={cn(
         "fixed left-4 top-18 z-40 flex h-[calc(100vh-5rem)] w-[min(22rem,calc(100vw-2rem))] flex-col rounded-2xl border border-surface-border bg-surface/95 p-4 shadow-2xl backdrop-blur transition-transform duration-200 ease-out",
         isOpen ? "translate-x-0" : "-translate-x-[calc(100%+2rem)]"
